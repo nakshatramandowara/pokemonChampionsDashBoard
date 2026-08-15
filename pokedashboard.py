@@ -669,7 +669,7 @@ def scan():
 # ================================================================ RENDER
 TYPE_COLORS = {"Normal":"#9fa4b0","Fire":"#ff8a4c","Water":"#4d9be6","Electric":"#f4cf3c",
     "Grass":"#5dc264","Ice":"#79d0cf","Fighting":"#e5546c","Poison":"#b160d4","Ground":"#e0a34a",
-    "Flying":"#93a8e6","Psychic":"#fb7189","Bug":"#a2c520","Rock":"#c9b878","Ghost":"#7275d8",
+    "Flying":"#93a8e6","Psychic":"#fb7189","Bug":"#a2c520","Rock":"#c9b878","Ghost":"#7d5ba3",
     "Dragon":"#5b6ee1","Dark":"#6a6480","Steel":"#6fa3b8","Fairy":"#f18fd8"}
 
 def usage_color(p, dark=False):

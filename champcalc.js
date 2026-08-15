@@ -210,7 +210,10 @@ if (DUMP_STONES) {
 // Every species name the calculator knows, so Python can bridge its own names
 // onto them without needing to parse champdata.js.
 if (DUMP_DEX) {
-    process.stdout.write(JSON.stringify(Object.keys(calc.pokedex)));
+    // species -> default ability, so Python can fill in abilities it wasn't told.
+    const dex = {};
+    for (const [name, entry] of Object.entries(calc.pokedex)) dex[name] = entry.ab || '';
+    process.stdout.write(JSON.stringify(dex));
     process.exit(0);
 }
 
@@ -283,6 +286,25 @@ function buildPokemon(spec) {
 }
 
 /**
+ * How many times a move connects.
+ *
+ * hitRange is either a fixed number (Dual Wingbeat: 2, Surging Strikes: 3) or a
+ * [min, max] range. For ranges we pick the count a damage calculator would show
+ * by default rather than the extremes, since this is a mid-battle read.
+ */
+function hitCount(entry) {
+    const range = entry.hitRange;
+    if (!range) return 1;
+    if (typeof range === 'number') return range;
+
+    const [low, high] = range;
+    if (high === 2) return 2;                    // Dragon Darts, both darts land
+    if (entry.isTripleHit || high === 3) return 3;
+    if (low === 2 && high === 5) return 3;       // the usual 2-5 move, ~3.1 average
+    return high;                                 // Population Bomb, Beat Up
+}
+
+/**
  * Assemble one move, starting from the calculator's own entry so that
  * Champions base powers, types and spread flags come along.
  */
@@ -298,8 +320,7 @@ function buildMove(moveName) {
         type: entry.type,
         category: entry.category,
 
-        // hitRange covers multi-hit moves like Icicle Spear.
-        hits: entry.hitRange ? entry.hitRange : 1,
+        hits: hitCount(entry),
 
         isCrit: false,
         isZ: false,
@@ -358,14 +379,28 @@ function buildField(format) {
  * Multi-hit moves return an array-of-arrays: one inner array per hit. Those
  * get summed so a three-hit move reports its total.
  */
-function summariseDamage(rawDamage) {
-    let rolls = rawDamage;
-
-    if (!Array.isArray(rolls)) {
-        rolls = [Math.trunc(rolls)];
+function summariseDamage(rawDamage, hits) {
+    if (!Array.isArray(rawDamage)) {
+        const one = Math.trunc(rawDamage) * hits;
+        return { min: one, max: one, average: one };
     }
-    if (Array.isArray(rolls[0])) {
-        rolls = rolls.map(perHit => perHit.reduce((sum, hit) => sum + hit, 0));
+
+    let rolls;
+
+    if (Array.isArray(rawDamage[0])) {
+        // Escalating-BP moves (Triple Axel: 20/40/60) come back as one array of
+        // 16 rolls PER HIT. Add them index by index to get the per-roll total --
+        // the hit count is already baked in, so it must not be applied again.
+        rolls = rawDamage[0].map(
+            (_value, rollIndex) =>
+                rawDamage.reduce((sum, perHit) => sum + perHit[rollIndex], 0)
+        );
+    } else {
+        // Every other multi-hit move returns ONE hit's 16 rolls, and the caller
+        // is expected to multiply. The description says "(2 hits)" while the
+        // numbers do not include it -- this is what made Dual Wingbeat read as
+        // 40 BP once instead of twice.
+        rolls = rawDamage.map(roll => roll * hits);
     }
 
     const total = rolls.reduce((sum, roll) => sum + roll, 0);
@@ -407,13 +442,19 @@ function main() {
             }
 
             for (const moveName of attackerSpec.moves || []) {
-                let outcome;
+                let outcome, moveObject;
                 try {
-                    // A fresh defender each time: GET_DAMAGE_SV mutates the
-                    // objects it is handed, so reusing one would let earlier
+                    // A fresh defender and move each time: GET_DAMAGE_SV mutates
+                    // the objects it is handed, so reusing them would let earlier
                     // moves leak into later results.
+                    //
+                    // That mutation is useful here: -ate abilities rewrite
+                    // move.type in place (Pixilate turns Hyper Voice into a Fairy
+                    // move), so reading it back afterwards gives the type the
+                    // move actually attacked with, not the one on the dex entry.
+                    moveObject = buildMove(moveName);
                     outcome = calc.GET_DAMAGE_SV(
-                        attacker, buildPokemon(defenderSpec), buildMove(moveName), field
+                        attacker, buildPokemon(defenderSpec), moveObject, field
                     );
                 } catch (e) {
                     errors.push(
@@ -422,7 +463,8 @@ function main() {
                     continue;
                 }
 
-                const damage = summariseDamage(outcome.damage);
+                const hits = moveObject.hits || 1;
+                const damage = summariseDamage(outcome.damage, hits);
                 const hitsToKO = damage.max <= 0
                     ? 0
                     : Math.ceil(defenderHP / damage.average);
@@ -431,12 +473,13 @@ function main() {
                     atk: attackerIndex,
                     def: defenderIndex,
                     move: moveName,
-                    type: calc.moves[moveName].type,
+                    type: moveObject.type,          // after any -ate change
                     min: damage.min,
                     max: damage.max,
                     avg: round(damage.average, 1),
                     pct: round(damage.average / defenderHP * 100, 1),
                     ko: hitsToKO,
+                    hits: hits,
                     desc: outcome.description,
                 });
             }

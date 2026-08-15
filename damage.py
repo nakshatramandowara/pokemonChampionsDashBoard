@@ -19,6 +19,12 @@ FORMAT    = "Doubles"
 TOP_MOVES = 3
 INERT     = "Pressure"          # verified identical to no ability
 
+# Abilities are modelled on MY side only. Some rewrite a move's type and power
+# outright -- Pixilate makes Sylveon's Hyper Voice a Fairy move at 1.2x, which is
+# the difference between neutral and double against a Dragon -- so ignoring them
+# is not a small error. The opponent stays on INERT: their ability is a guess, and
+# a wrong Thick Fat or Multiscale would quietly halve every number on the card.
+
 # myteam.json key -> calculator key
 K     = {"hp": "hp", "atk": "at", "def": "df", "spa": "sa", "spd": "sd", "spe": "sp"}
 STATS = ["atk", "def", "spa", "spd", "spe"]
@@ -106,7 +112,10 @@ def load_team(base_stats):
     """base_stats: {species: {hp,at,df,sa,sd,sp}} straight from index_cache
     (summary.baseStats), i.e. Lv50 zero-SP values with the offsets already in."""
     global _TEAM, _MTIME
+    global _DEX
     stones = _stones()
+    if not _DEX:
+        _DEX = dex_names()
     team, out = json.load(open(TEAM_FILE, encoding="utf-8"))["team"], []
     for m in team:
         name, sp, st = m["name"], m["sp"], m["stats"]
@@ -137,14 +146,22 @@ def load_team(base_stats):
         if built != {**st, **{"hp": st["hp"]}} and any(built[K[s]] != st[s] for s in STATS):
             print(f"[dmg] {name}: stats did not reconcile, skipped")
             continue
+        # An ability named in myteam.json wins; otherwise the species default,
+        # which is the competitively relevant one often enough (Sylveon's
+        # Pixilate, Primarina's Liquid Voice).
+        ability = m.get("ability") or _DEX.get(name) or INERT
         e = {"name": name, "item": m["item"], "moves": m["moves"],
-             "stats": built, "nature": (up, dn)}
+             "stats": built, "nature": (up, dn), "ability": ability}
         stone = stones.get(m["item"])
         if stone:
+            # a mega brings its own ability -- Mega Gardevoir gains Pixilate
             e["mega"] = {"name": stone["forme"],
-                         "stats": _stats(stone["bs"], sp, up, dn)}
+                         "stats": _stats(stone["bs"], sp, up, dn),
+                         "ability": (m.get("ability")
+                                     or _DEX.get(stone["forme"]) or INERT)}
         out.append(e)
-        print(f"[dmg] {name:14} +{up}/-{dn}" + (f"  <> {e['mega']['name']}" if stone else ""))
+        note = f"  <> {e['mega']['name']}" if stone else ""
+        print(f"[dmg] {name:14} +{up}/-{dn}  {ability}{note}")
     _TEAM = out
     _MTIME = os.path.getmtime(TEAM_FILE)
     return out
@@ -156,8 +173,14 @@ def team_if_changed(base_stats):
     return _TEAM
 
 
+_DEX = {}
+
+
 def dex_names():
-    """Every species name in the Champions dex, for bridging index names."""
+    """{species: default ability} for the whole Champions dex.
+
+    Iterating it yields species names, so it still works anywhere a plain list
+    of names is expected."""
     p = subprocess.run(["node", CALC_JS, DATA_JS, "--dex"],
                        capture_output=True, text=True, timeout=30)
     return json.loads(p.stdout) if p.returncode == 0 else []
@@ -230,8 +253,9 @@ def compute_all(enemies):
             use = member["mega"] if (scope == "on" and "mega" in member) else member
             attacker_of[(scope, member_i)] = len(attackers)
             attackers.append({
-                "name": use["name"], "ability": INERT, "item": member["item"],
-                "stats": use["stats"], "moves": member["moves"],
+                "name": use["name"], "ability": use.get("ability", INERT),
+                "item": member["item"], "stats": use["stats"],
+                "moves": member["moves"],
             })
 
     response = _call(attackers, defenders)

@@ -491,6 +491,19 @@ function cantFlingItem(atItem, atSpecies, defAbility) {
         || (["As One", "Unnerve"].indexOf(defAbility) !== -1 && atItem.indexOf(" Berry") !== -1);
 }
 
+/* ================= from ap_calc.js: shared helper ================= */
+/* damage_MASTER.js reassigns hasType on the combatants it builds for
+   multi-hit moves (Triple Axel), but the function itself lives in ap_calc.js,
+   which is otherwise all DOM code. Without it Triple Axel throws. */
+var setHasTypeFunc = function (...types) {
+    for (const type of types) {
+        if ([this.type1, this.type2].includes(type)) {
+            return true;
+        }
+    }
+    return false;
+};
+
 /* ================= damage_MASTER.js (unchanged) ================= */
 /* Damage calculation for the Generation VIII games: Sword, Shield, Isle of Armor, and Crown Tundra; 
  * and for the Generation VII games: Sun, Moon, Ultra Sun, and Ultra Moon*/
