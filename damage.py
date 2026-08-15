@@ -16,7 +16,7 @@ TEAM_FILE = os.path.join(HERE, "myteam.json")
 CALC_JS   = os.path.join(HERE, "champcalc.js")
 DATA_JS   = os.path.join(HERE, "champdata.js")
 FORMAT    = "Doubles"
-TOP_MOVES = 2
+TOP_MOVES = 3
 INERT     = "Pressure"          # verified identical to no ability
 
 # myteam.json key -> calculator key
@@ -259,7 +259,8 @@ def compute_all(enemies):
                     cells.append({
                         "name": member["name"],
                         "mega": "mega" in member,
-                        "moves": [[r["move"], round(r["avg"] / hp * 100)]
+                        # [move name, percent of the target's HP, move type]
+                        "moves": [[r["move"], round(r["avg"] / hp * 100), r.get("type")]
                                   for r in rows[:TOP_MOVES]],
                     })
                 grid[variant][scope] = cells

@@ -431,6 +431,7 @@ function main() {
                     atk: attackerIndex,
                     def: defenderIndex,
                     move: moveName,
+                    type: calc.moves[moveName].type,
                     min: damage.min,
                     max: damage.max,
                     avg: round(damage.average, 1),

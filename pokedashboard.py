@@ -9,6 +9,7 @@ Each upload auto-reloads the dashboard within ~1s.  --refresh re-pulls the index
 import glob, os, re, json, io, base64, sys, time, threading, webbrowser, urllib.request, html, copy
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
+import damage, bridge
 from PIL import Image
 from flask import Flask, request, Response, jsonify
 import socket
@@ -28,7 +29,7 @@ MERGE_FORMATS = True             # union move usage across both formats (surface
 TOP_P     = 85.0
 TOP_P_CAP = 5
 
-BUILD     = "2026-08-14-finder-merge"  # visible in header + startup log to confirm live code
+BUILD     = "2026-08-15-damage"  # visible in header + startup log to confirm live code
 
 # --- teamsheet conditioning (vgcfinder) ---
 DIVERGE     = 20.0   # pp gap before the global figure is annotated / a negative is shown
@@ -149,6 +150,50 @@ def load_index(force=False):
 INDEX = load_index()
 BY_SLUG = {e["slug"]: e for e in INDEX.get("pokemon", [])}
 print(f"Index: {len(BY_SLUG)} Pokemon. Refs: {len(_labels)}. Format: {FORMAT}")
+
+# ================================================================ DAMAGE SETUP
+# The calculator names species its own way ("Ninetales-Alola" where the index
+# says "Alolan Ninetales"), so every index entry is bridged once at startup.
+DEX_NAME = {}          # index slug        -> Champions dex name
+DEX_MEGAS = {}         # Champions dex name -> [(stone, info)], X before Y
+
+def _init_damage():
+    try:
+        dex = damage.dex_names()
+        stones = damage._stones()
+    except Exception as e:
+        print(f"[dmg] calculator unavailable, damage rows off: {e}")
+        return False
+    if not dex:
+        print("[dmg] calculator returned no dex, damage rows off")
+        return False
+
+    resolve = bridge.build(dex)
+    base_by_dex, misses = {}, []
+    for e in INDEX.get("pokemon", []):
+        hit, _how = resolve(e.get("name", ""))
+        if hit is None:
+            misses.append(f"{e.get('slug')} ({e.get('name')})")
+            continue
+        DEX_NAME[e["slug"]] = hit
+        base_by_dex[hit] = (e.get("summary", {}) or {}).get("baseStats", {})
+
+    for stone, info in stones.items():
+        DEX_MEGAS.setdefault(info["base"], []).append((stone, info))
+    for base in DEX_MEGAS:                       # X before Y, matching _megas_of
+        DEX_MEGAS[base].sort(key=lambda si: ("X" not in si[0], "Y" not in si[0]))
+
+    print(f"[dmg] bridged {len(DEX_NAME)}/{len(INDEX.get('pokemon', []))} index names")
+    if misses:
+        print(f"[dmg] no dex match: {', '.join(misses[:12])}")
+    try:
+        damage.load_team(base_by_dex)
+    except Exception as e:
+        print(f"[dmg] could not load myteam.json: {e}")
+        return False
+    return True
+
+DAMAGE_ON = _init_damage()
 
 # ================================================================ TEAMSHEETS (vgcfinder)
 import vgcfinder as vf
@@ -365,6 +410,18 @@ def _megas_of(e):
     # sort X before Y so the array index is deterministic even if a tag fails
     return sorted(ms, key=lambda f: {"X": 0, "Y": 1}.get(_mega_tag(f), 2))
 
+SPREAD_KEYS = [("hp", "hp_points"), ("at", "attack_points"), ("df", "defense_points"),
+               ("sa", "sp_atk_points"), ("sd", "sp_def_points"), ("sp", "speed_points")]
+
+def _spread_rows(rows):
+    """Raw stat-point spreads, most common first, for the damage calculator."""
+    out = []
+    for r in sorted(rows, key=lambda r: -_pct(r))[:TOP_P_CAP]:
+        out.append({"label": _spread_str(r), "pct": _pct(r),
+                    "points": {short: int(r.get(key) or 0) for short, key in SPREAD_KEYS}})
+    return out or [{"label": "0/0/0/0/0/0", "pct": 0.0,
+                    "points": {short: 0 for short, _k in SPREAD_KEYS}}]
+
 def extract(slug):
     e = BY_SLUG.get(slug)
     if not e:
@@ -447,6 +504,11 @@ def extract(slug):
     out["moves"] = [(n, p, tag, None) for n, p, tag in out["moves"]]
     out["moves_neg"] = []
     out["cond_n"] = 0
+    # damage: spreads keep their raw stat points, and the defending nature is
+    # taken as the most common one (see note in the damage row)
+    out["spread_rows"] = _spread_rows(by_cat.get("stat_points", []))
+    out["nature_top"] = out["nature"][0][0] if out["nature"] else None
+    out["dexname"] = DEX_NAME.get(slug)
     return out
 
 # ================================================================ CONDITIONING
@@ -508,6 +570,61 @@ def condition(d, a):
                      if MOVE_PRIORITY.get(nm)][:4]
     return d
 
+# ================================================================ DAMAGE
+# Every spread, every enemy forme and both of my mega states in one pass
+# (~700ms worst case), started in the background so cards render immediately.
+# The page then holds the whole grid and every toggle is a local lookup.
+_DMG = {"key": None, "ready": False, "grids": []}
+_dmg_lock = threading.Lock()
+
+def _enemy_specs(cards):
+    specs = []
+    for c in cards:
+        d = c.get("data") or {}
+        dexname = d.get("dexname")
+        if not dexname:
+            specs.append(None)
+            continue
+        e = BY_SLUG.get(c["slug"], {})
+        specs.append({
+            "name": dexname,
+            "base": (e.get("summary", {}) or {}).get("baseStats", {}),
+            "nature": d.get("nature_top"),
+            "spreads": d.get("spread_rows") or [],
+            "megas": [{"name": i["forme"], "base": i["bs"]}
+                      for _s, i in DEX_MEGAS.get(dexname, [])],
+        })
+    return specs
+
+def _damage_worker(key, cards):
+    specs = _enemy_specs(cards)
+    real = [s for s in specs if s]
+    grids = []
+    if real:
+        try:
+            computed = damage.compute_all(real)
+        except Exception as e:
+            print(f"[dmg] compute failed: {e}")
+            computed = []
+        it = iter(computed)
+        grids = [next(it, {}) if s else {} for s in specs]
+    else:
+        grids = [{} for _s in specs]
+    with _dmg_lock:
+        if _DMG["key"] == key:
+            _DMG["grids"] = grids
+            _DMG["ready"] = True
+            print(f"[dmg] ready for {key}")
+
+def start_damage(key, cards):
+    if not DAMAGE_ON:
+        return
+    with _dmg_lock:
+        if _DMG["key"] == key:
+            return                       # already done or in flight for this shot
+        _DMG.update(key=key, ready=False, grids=[])
+    threading.Thread(target=_damage_worker, args=(key, cards), daemon=True).start()
+
 # ================================================================ SCAN
 def scan():
     finder_if_changed()          # a CLI rebuild lands without restarting the server
@@ -545,7 +662,9 @@ def scan():
         thumb = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
         cards.append({"label": label, "slug": slug, "data": data,
                       "gdata": gdata, "thumb": thumb})
-    return os.path.basename(latest), cards, fin
+    shot = os.path.basename(latest)
+    start_damage(shot, cards)
+    return shot, cards, fin
 
 # ================================================================ RENDER
 TYPE_COLORS = {"Normal":"#9fa4b0","Fire":"#ff8a4c","Water":"#4d9be6","Electric":"#f4cf3c",
@@ -601,6 +720,17 @@ def cent(n, p, g=None, cnt=None, tot=None):
 def cat_col(lab, ents, negs=()):
     rows = "".join(cent(*e) for e in ents) or '<div class="cent dim">&mdash;</div>'
     return f'<div class="ccol"><span class="clab">{lab}</span>{rows}{neg_row(negs)}</div>'
+
+def spread_col(lab, ents):
+    """cat_col, but each spread is selectable and drives the damage row."""
+    rows = ""
+    for i, e in enumerate(ents):
+        sel = " sel" if i == 0 else ""
+        rows += (f'<div class="cent spr-pick{sel}" data-si="{i}" onclick="pickSpread(this)">'
+                 f'<b style="color:{usage_color(e[1])}">{e[0]}</b>'
+                 f'<i>{e[1]:.0f}%</i></div>')
+    rows = rows or '<div class="cent dim">&mdash;</div>'
+    return f'<div class="ccol"><span class="clab">{lab}</span>{rows}</div>'
 
 def _is_stone(name):
     """True if the item name is a Mega Stone (X/Y designator stripped first)."""
@@ -684,14 +814,26 @@ def _variant(d, cls):
             '&mdash; this column is always global">g</u>')
     detail = (ability_col + item_col(d) +
               cat_col("Nature", d["nature"], d.get("nature_neg", [])) +
-              cat_col(slab, d["spread"]))
+              spread_col(slab, d["spread"]))
     moves = "".join(_move_cell(n, p, is_status(n), tag, g)
                     for n, p, tag, g in d["moves"][:MOVE_CAP]) or '<span class="nd">no move data</span>'
     return (f'<div class="{cls}"><div class="moves">{moves}</div>'
             f'{neg_row(d.get("moves_neg", []), "not run")}'
             f'<div class="detail">{detail}</div></div>')
 
-def card_html(c):
+def dmg_btn():
+    if not DAMAGE_ON:
+        return ""
+    return ('<button class="notebtn dmgbtn" type="button" '
+            'onclick="toggleDmg(this)">&#9876; Dmg</button>')
+
+def dmg_wrap():
+    if not DAMAGE_ON:
+        return ""
+    return ('<div class="dmgwrap" hidden><div class="dmgrow">'
+            '<span class="dmgwait">calculating&hellip;</span></div></div>')
+
+def card_html(c, ei=0):
     slug = c.get("slug")
     if not c["data"]:
         return (f'<article class="card miss"><div class="head"><img class="spr" src="{c["thumb"]}">'
@@ -730,11 +872,12 @@ def card_html(c):
         chips = head_chips(d["head"])
         cbadge = '<span class="cbadge glob" title="no exact teamsheet match">global</span>'
     ccls = "card cond" if cn else "card"
-    return f"""<article class="{ccls}" data-slug="{slug or ''}"{data_attrs}>
+    return f"""<article class="{ccls}" data-ei="{ei}" data-slug="{slug or ''}"{data_attrs}>
       <div class="head"><img class="spr" src="{c['thumb']}">
         <div class="idb"><h2>{d['name']}</h2><div class="types">{badges}</div>{cbadge}</div>
-        <div class="head-right">{chips}{note_btn(slug)}</div></div>
+        <div class="head-right">{chips}{dmg_btn()}{note_btn(slug)}</div></div>
       {body}
+      {dmg_wrap()}
       {note_wrap(slug)}{statwrap}</article>"""
 
 def _finder_status(fin):
@@ -755,7 +898,8 @@ def _finder_status(fin):
 
 def page(version):
     shot, cards, fin = scan()
-    body = (f'<div class="grid">{"".join(card_html(c) for c in cards)}</div>'
+    tcol = json.dumps(TYPE_COLORS)          # damage chips are coloured by move type
+    body = (f'<div class="grid">{"".join(card_html(c, i) for i, c in enumerate(cards))}</div>'
             if shot else '<p class="empty">No screenshot yet — tap the MacroDroid button.</p>')
     meta = shot if shot else "waiting"
     fstat = _finder_status(fin if shot else None)
@@ -867,6 +1011,20 @@ span.cbadge.vglobal{{display:none}}
 .smv{{display:block;font:13px/1 var(--mono)}}
 .smb{{display:block;height:5px;background:var(--inset);border-radius:3px;overflow:hidden;margin-top:5px}}
 .smb i{{display:block;height:100%;background:#4a7fae}}
+.dmgwrap{{margin-top:12px;border-top:1px solid var(--line);padding-top:11px}}
+.dmgrow{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px 16px}}
+.dmgwait{{color:var(--dim);font:11px var(--mono)}}
+.dmgcell{{display:flex;align-items:center;gap:7px;min-width:0}}
+.dmgname{{font:600 11px var(--f);color:var(--dim);white-space:nowrap;flex:0 0 auto}}
+.dmgmvs{{display:flex;align-items:center;gap:4px;margin-left:auto}}
+.dmgmv{{font:700 10.5px/1 var(--mono);border-radius:5px;padding:3px 6px;
+  min-width:30px;text-align:center;cursor:help}}
+.dmgms{{cursor:pointer;color:var(--dim);font-size:9px;flex:none;user-select:none}}
+.dmgms.on{{color:var(--warn)}}
+.dmgbtn.hasnote{{color:var(--warn);border-color:var(--warn)}}
+.spr-pick{{cursor:pointer;border-radius:5px;padding:1px 4px;margin:0 -4px 5px}}
+.spr-pick:hover{{background:rgba(84,214,191,.10)}}
+.spr-pick.sel{{background:rgba(84,214,191,.15)}}
 .card.miss{{opacity:.7}} .nd{{color:var(--dim);font:12px var(--f);margin:6px 0 0}}
 .empty{{color:var(--dim);padding:44px 24px}}
 </style></head><body>
@@ -880,6 +1038,7 @@ span.cbadge.vglobal{{display:none}}
 {body}
 <script>
 const V={version};let reloading=false;let building=false;
+const TCOL={tcol};
 async function rebuild(ev){{
   const full=ev.altKey||ev.shiftKey;
   if(full&&!confirm('Full rebuild: re-fetch every tournament from scratch, ignoring '
@@ -904,7 +1063,8 @@ function applyLayout(n){{const g=document.querySelector('.grid');
 function toggleLayout(){{let n=2;try{{n=localStorage.getItem('cols')==='2'?3:2;}}catch(e){{}}applyLayout(n);}}
 (function(){{let n=3;try{{n=localStorage.getItem('cols')||3;}}catch(e){{}}applyLayout(n);}})();
 setInterval(async()=>{{if(building)return;try{{const r=await fetch('/version?t='+Date.now(),{{cache:'no-store'}});
-  const j=await r.json();if(j.v!==V){{reloading=true;location.reload();}}}}catch(e){{}}}},1000);
+  const j=await r.json();if(j.v!==V){{reloading=true;location.reload();}}
+  else if(j.d&&!dmgLoaded)loadDamage();}}catch(e){{}}}},1000);
 function setScope(card,g){{card.classList.toggle('gs',g);
   try{{localStorage.setItem('gs:'+card.dataset.slug,g?'1':'0');}}catch(e){{}}
   if(card.dataset.megas)applyForm(card);}}
@@ -958,9 +1118,99 @@ function loadForm(card){{try{{const s=JSON.parse(localStorage.getItem('mega:'+ca
 function toggleStone(el){{const card=el.closest('.card');const v=el.dataset.v;
   if(card.dataset.on==='1'&&card.dataset.v===v){{card.dataset.on='0';}}
   else{{card.dataset.on='1';card.dataset.v=v;}}
-  applyForm(card);saveForm(card);
+  applyForm(card);saveForm(card);paintDamage(card);
   const w=card.querySelector('.statwrap');if(w)w.removeAttribute('hidden');}}
 (function(){{document.querySelectorAll('.card[data-megas]').forEach(function(c){{loadForm(c);applyForm(c);}});}})();
+/* ---- damage ------------------------------------------------------------
+   DMG[cardIndex][spreadIndex + ':' + enemyForme][myMegaScope] -> six cells.
+   The server computes every combination once, so nothing here refetches.
+   myMegaOff holds the names I have chosen NOT to mega. */
+let DMG=null,dmgLoaded=false,myMegaOff=new Set();
+try{{myMegaOff=new Set(JSON.parse(localStorage.getItem('nomega')||'[]'));}}catch(e){{}}
+function dcolor(p){{p=Math.max(0,Math.min(150,p));return 'hsl('+(p*0.8).toFixed(0)+' 80% 63%)';}}
+// The type palette spans Electric (#f4cf3c, very light) to Dark (#6a6480), so no
+// single ink colour stays legible on all of them. Pick whichever of near-black or
+// white has the better WCAG contrast ratio against each chip.
+function _lum(hex){{
+  const v=[1,3,5].map(function(i){{
+    let c=parseInt(hex.substr(i,2),16)/255;
+    return c<=0.03928?c/12.92:Math.pow((c+0.055)/1.055,2.4);}});
+  return 0.2126*v[0]+0.7152*v[1]+0.0722*v[2];}}
+function _ratio(a,b){{const x=_lum(a),y=_lum(b);
+  return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05);}}
+function _mix(hex,t,toward){{           // blend hex toward black (0) or white (255)
+  const p=[1,3,5].map(function(i){{
+    const c=parseInt(hex.substr(i,2),16);
+    return Math.round(c+(toward-c)*t);}});
+  return '#'+p.map(function(c){{return c.toString(16).padStart(2,'0');}}).join('');}}
+const DARK_INK='#0b0f16',LIGHT_INK='#ffffff',AA=4.5;
+const _CHIP={{}};
+// Returns the background and ink to use together. Most type colours clear AA
+// against near-black as-is; the few that do not (Dragon) get nudged a step at a
+// time toward black or white until they do, which keeps the hue recognisable.
+function chip(bg){{
+  if(_CHIP[bg])return _CHIP[bg];
+  let out={{bg:bg,fg:DARK_INK}};
+  try{{
+    const useLight=_ratio(bg,LIGHT_INK)>_ratio(bg,DARK_INK);
+    const fg=useLight?LIGHT_INK:DARK_INK;
+    let b=bg;
+    for(let i=0;i<8&&_ratio(b,fg)<AA;i++)b=_mix(b,0.07,useLight?0:255);
+    out={{bg:b,fg:fg}};
+  }}catch(e){{}}
+  return _CHIP[bg]=out;}}
+function enemyForme(card){{return card.dataset.on==='1'?(card.dataset.v||'0'):'b';}}
+function spreadIndex(card){{const s=card.querySelector('.spr-pick.sel');return s?s.dataset.si:'0';}}
+function paintDamage(card){{
+  const row=card.querySelector('.dmgrow');if(!row)return;
+  const ei=card.dataset.ei;
+  if(!DMG||!DMG[ei]){{row.innerHTML='<span class="dmgwait">calculating&hellip;</span>';return;}}
+  const grid=DMG[ei][spreadIndex(card)+':'+enemyForme(card)];
+  if(!grid){{row.innerHTML='<span class="dmgwait">no data for this spread</span>';return;}}
+  const on=grid.on||[],off=grid.off||[];let html='';
+  for(let i=0;i<on.length;i++){{
+    const canMega=on[i].mega,useMega=canMega&&!myMegaOff.has(on[i].name);
+    const cell=(useMega?on:off)[i]||on[i];
+    const stone=canMega?'<span class="dmgms'+(useMega?' on':'')
+      +'" data-mi="'+i+'" title="toggle Mega">&#9670;</span>':'';
+    const mvs=(cell.moves||[]).map(function(m){{
+      const st=chip(TCOL[m[2]]||'#888888');
+      return '<span class="dmgmv" style="background:'+st.bg+';color:'+st.fg+'" title="'
+        +m[0]+' &middot; '+m[2]+' &middot; '+m[1]+'%">'+m[1]+'</span>';
+    }}).join('');
+    html+='<div class="dmgcell">'+stone+'<span class="dmgname">'+cell.name+'</span>'+
+          '<span class="dmgmvs">'+
+          (mvs||'<span class="dmgmv" style="color:var(--dim)">&mdash;</span>')+'</span></div>';
+  }}
+  row.innerHTML=html;}}
+function paintAllDamage(){{document.querySelectorAll('.card[data-ei]').forEach(paintDamage);}}
+function toggleMyMega(name){{
+  if(myMegaOff.has(name))myMegaOff.delete(name);else myMegaOff.add(name);
+  try{{localStorage.setItem('nomega',JSON.stringify([...myMegaOff]));}}catch(e){{}}
+  paintAllDamage();}}
+// Delegated. The diamond carries only its index, so no Pokemon name is ever
+// spliced into an HTML attribute -- that nesting broke the whole script, and
+// would break again on a name like Farfetch'd.
+document.addEventListener('click',function(ev){{
+  const el=ev.target.closest?ev.target.closest('.dmgms'):null;if(!el)return;
+  ev.stopPropagation();
+  const card=el.closest('.card');if(!card||!DMG)return;
+  const grid=DMG[card.dataset.ei];if(!grid)return;
+  const g=grid[spreadIndex(card)+':'+enemyForme(card)];if(!g||!g.on)return;
+  const cell=g.on[parseInt(el.dataset.mi,10)];if(cell)toggleMyMega(cell.name);}});
+function pickSpread(el){{const card=el.closest('.card'),si=el.dataset.si;
+  // both the local and global blocks carry spread cells; keep them in step
+  card.querySelectorAll('.spr-pick').forEach(function(s){{
+    s.classList.toggle('sel',s.dataset.si===si);}});
+  paintDamage(card);}}
+function toggleDmg(b){{const w=b.closest('.card').querySelector('.dmgwrap');if(!w)return;
+  if(w.hasAttribute('hidden')){{w.removeAttribute('hidden');b.classList.add('hasnote');
+    paintDamage(b.closest('.card'));}}
+  else{{w.setAttribute('hidden','');b.classList.remove('hasnote');}}}}
+async function loadDamage(){{if(dmgLoaded)return;
+  try{{const j=await(await fetch('/damage?t='+Date.now(),{{cache:'no-store'}})).json();
+    if(!j.ready)return;DMG=j.grids;dmgLoaded=true;paintAllDamage();}}catch(e){{}}}}
+
 async function saveNote(t){{try{{await fetch('/note',{{method:'POST',
   headers:{{'Content-Type':'application/json'}},
   body:JSON.stringify({{slug:t.dataset.slug,text:t.value}})}});
@@ -993,7 +1243,16 @@ def upload():
 
 @app.route("/version")
 def version():
-    r = jsonify(v=VERSION)
+    with _dmg_lock:
+        ready = _DMG["ready"]
+    r = jsonify(v=VERSION, d=ready)
+    r.headers["Cache-Control"] = "no-store"
+    return r
+
+@app.route("/damage")
+def damage_grid():
+    with _dmg_lock:
+        r = jsonify(ready=_DMG["ready"], key=_DMG["key"], grids=_DMG["grids"])
     r.headers["Cache-Control"] = "no-store"
     return r
 
