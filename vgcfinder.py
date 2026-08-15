@@ -87,6 +87,17 @@ def titlecase(s):
 
 SEEN_FIELDS = Counter()   # diagnostic: what keys the API actually returns
 
+NOT_STONES = {"eviolite"}          # ends in -ite but is not a Mega Stone
+
+
+def is_stone(name):
+    """Mega Stones all end in -ite ('Charizardite Y'). The previous check looked
+    for the words 'mega' and 'stone', which no real item name contains, so the
+    flag was always False."""
+    core = re.sub(r"\b[xy]\b", "", (name or "").lower())
+    core = re.sub(r"[^a-z]", "", core)
+    return bool(core) and core.endswith("ite") and core not in NOT_STONES
+
 
 def mon_entry(m):
     """Normalise one teamsheet slot. Field names vary a little by era/game."""
@@ -113,7 +124,7 @@ def mon_entry(m):
         "name": pick("name", "pokemon", "species"),
         "item": item,
         "ability": pick("ability"),
-        "mega": bool(item and "mega" in item.lower() and "stone" in item.lower()),
+        "mega": is_stone(item),
         "nature": pick("nature"),
         "moves": moves,
     }
@@ -133,41 +144,56 @@ def formats():
         print(f"  {f:<10} {n} recent tournaments")
 
 
-def build(fmt, limit=400, min_players=16):
+class BuildAborted(RuntimeError):
+    """Build stopped early but progress was saved; re-run to resume."""
+
+
+def build(fmt, limit=400, min_players=16, fresh=False, progress=None):
+    def note(msg):
+        print(msg, file=sys.stderr)
+        if progress:
+            progress(msg)
+
     tours = get("/tournaments", game="VGC", limit=limit, format=fmt)
     tours = [t for t in tours if t.get("players", 0) >= min_players]
     stray = {t.get("format") for t in tours} - {fmt}
     if stray:
-        print(f"warning: mixed formats came back: {stray}", file=sys.stderr)
-    print(f"{len(tours)} tournaments to pull", file=sys.stderr)
+        note(f"warning: mixed formats came back: {stray}")
+    note(f"{len(tours)} tournaments to pull")
 
     teams, seen = [], set()
     done = set()
-    if os.path.exists(CACHE):                      # resume a killed / rate-limited run
+    # `fresh` re-fetches everything: the only way to re-parse teams cached before
+    # a mon_entry fix, since the resume path deliberately never touches them.
+    if os.path.exists(CACHE) and not fresh:        # resume a killed / rate-limited run
         old = json.load(open(CACHE))
         if old.get("format") == fmt:
             teams = old.get("teams", [])
             done = set(old.get("done", []))
             seen = {(t["player"], t["tid"]) for t in teams}
-            print(f"resuming: {len(done)} tournaments already cached", file=sys.stderr)
+            note(f"resuming: {len(done)} tournaments already cached")
 
     def save():
-        json.dump({"built": time.time(), "format": fmt,
-                   "done": sorted(done), "teams": teams}, open(CACHE, "w"))
+        # atomic: the dashboard hot-reloads on mtime, so it must never see a half file
+        tmp = CACHE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({"built": time.time(), "format": fmt,
+                       "done": sorted(done), "teams": teams}, fh)
+        os.replace(tmp, CACHE)
 
     todo = [t for t in tours if t["id"] not in done]
-    print(f"{len(todo)} left to fetch", file=sys.stderr)
+    note(f"{len(todo)} left to fetch")
 
     for i, t in enumerate(todo, 1):
-        print(f"  [{i}/{len(todo)}] {t['name'][:52]}", file=sys.stderr)
+        note(f"[{i}/{len(todo)}] {t['name'][:52]}")
         try:
             standings = get(f"/tournaments/{t['id']}/standings")
         except RuntimeError as e:
             save()
-            sys.exit(f"\n{e}\nProgress saved ({len(done)} tournaments). "
-                     f"Re-run the same build command later to resume.")
+            raise BuildAborted(f"{e}\nProgress saved ({len(done)} tournaments). "
+                               f"Re-run the same build command later to resume.")
         except Exception as e:
-            print(f"    skipped ({e})", file=sys.stderr)
+            note(f"    skipped ({e})")
             done.add(t["id"])                      # genuinely broken, don't retry forever
             continue
 
@@ -182,7 +208,10 @@ def build(fmt, limit=400, min_players=16):
             if len(mons) < 4:
                 continue
 
-            key = (p.get("player"), t["id"])
+            # must match the value stored below, since a resumed run rebuilds
+            # `seen` from t["player"] — using p.get("player") here would not line up
+            who = p.get("name") or p.get("player")
+            key = (who, t["id"])
             if key in seen:
                 continue
             seen.add(key)
@@ -190,7 +219,7 @@ def build(fmt, limit=400, min_players=16):
             teams.append({
                 "keys": sorted({norm(m["name"]) for m in mons}),
                 "mons": mons,
-                "player": p.get("name") or p.get("player"),
+                "player": who,
                 "tid": t["id"],
                 "place": p.get("placing"),
                 "record": p.get("record"),
@@ -206,15 +235,15 @@ def build(fmt, limit=400, min_players=16):
         time.sleep(1.0)
 
     save()
-    print(f"\ncached {len(teams)} teamsheets from {len(done)} tournaments -> {CACHE}",
-          file=sys.stderr)
+    note(f"cached {len(teams)} teamsheets from {len(done)} tournaments")
     if SEEN_FIELDS:
         print("teamsheet fields seen: "
               + ", ".join(f"{k}({v})" for k, v in SEEN_FIELDS.most_common()),
               file=sys.stderr)
         got = sum(1 for t in teams for m in t["mons"] if m["moves"])
         tot = sum(len(t["mons"]) for t in teams)
-        print(f"moves parsed on {got}/{tot} slots", file=sys.stderr)
+        note(f"moves parsed on {got}/{tot} slots")
+    return len(teams)
 
 
 def load():
@@ -339,6 +368,9 @@ def main():
                    help="format ID from `formats`, e.g. the current regulation")
     b.add_argument("--limit", type=int, default=400)
     b.add_argument("--min-players", type=int, default=16)
+    b.add_argument("--fresh", action="store_true",
+                   help="ignore the existing cache and re-fetch everything "
+                        "(needed after a teamsheet-parsing fix)")
 
     f = sub.add_parser("find", help="search by Pokemon you've seen")
     f.add_argument("pokemon", nargs="+")
@@ -350,7 +382,10 @@ def main():
     if a.cmd == "formats":
         formats()
     elif a.cmd == "build":
-        build(a.fmt, a.limit, a.min_players)
+        try:
+            build(a.fmt, a.limit, a.min_players, fresh=a.fresh)
+        except BuildAborted as e:
+            sys.exit(f"\n{e}")
     else:
         find(a.pokemon, a.fmt, a.top, a.sets)
 
