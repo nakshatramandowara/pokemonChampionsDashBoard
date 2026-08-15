@@ -1,8 +1,12 @@
 /*
  * champcalc.js - runs the NCP VGC damage calculator without a browser.
  *
- *   node champcalc.js [champdata.js] < request.json > result.json
- *   node champcalc.js [champdata.js] --stones     (dump the mega-stone table)
+ *   node champcalc.js [dir] < request.json > result.json
+ *   node champcalc.js [dir] --stones     (dump the mega-stone table)
+ *   node champcalc.js [dir] --dex        (dump species -> default ability)
+ *
+ * Reads champdata.js (tables) and champengine.js (the calculator) from the same
+ * folder as this file, or from [dir] if given.
  *
  * ---------------------------------------------------------------------------
  * WHY THIS FILE EXISTS
@@ -64,7 +68,10 @@ const fs = require('fs');
 const vm = require('vm');
 const path = require('path');
 
-const DATA_FILE = process.argv[2] || path.join(__dirname, 'champdata.js');
+// Data and engine are separate files so a Champions balance patch produces a
+// readable diff in champdata.js rather than one buried in the engine.
+const DATA_DIR = process.argv[2] || __dirname;
+const SOURCE_FILES = ['champdata.js', 'champengine.js'];
 const DUMP_STONES = process.argv[3] === '--stones';
 const DUMP_DEX    = process.argv[3] === '--dex';
 
@@ -139,7 +146,10 @@ const fakeJQuery = Object.assign(
 
 const calc = { console, $: fakeJQuery, jQuery: fakeJQuery };
 vm.createContext(calc);
-vm.runInContext(fs.readFileSync(DATA_FILE, 'utf8'), calc, { filename: 'champdata.js' });
+for (const file of SOURCE_FILES) {
+    const full = path.join(DATA_DIR, file);
+    vm.runInContext(fs.readFileSync(full, 'utf8'), calc, { filename: file });
+}
 
 // The calculator picks its data tables off a global `gen`. Champions is gen 10,
 // per the switch statement in the original switch_mode.js.

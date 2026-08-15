@@ -5,7 +5,8 @@ damage.py - my-team damage rows for the Champions Scout dashboard.
     damage.load_team()                      # reads myteam.json, validates, derives nature
     rows = damage.rows_for(enemies)         # enemies = [{"name","stats"} ...]
 
-Requires:  myteam.json, champcalc.js, champdata.js  (all beside this file).
+Requires:  myteam.json, champcalc.js, champdata.js, champengine.js
+           (all beside this file).
 Enemy abilities/items/boosts and all field state are deliberately NOT modelled;
 only typing, base stats, spread, nature, and MY held item affect the numbers.
 """
@@ -14,7 +15,7 @@ import json, os, subprocess
 HERE      = os.path.dirname(os.path.abspath(__file__))
 TEAM_FILE = os.path.join(HERE, "myteam.json")
 CALC_JS   = os.path.join(HERE, "champcalc.js")
-DATA_JS   = os.path.join(HERE, "champdata.js")
+DATA_DIR  = HERE                 # champdata.js + champengine.js live here
 FORMAT    = "Doubles"
 TOP_MOVES = 3
 INERT     = "Pressure"          # verified identical to no ability
@@ -181,21 +182,24 @@ def dex_names():
 
     Iterating it yields species names, so it still works anywhere a plain list
     of names is expected."""
-    p = subprocess.run(["node", CALC_JS, DATA_JS, "--dex"],
+    p = subprocess.run(["node", CALC_JS, DATA_DIR, "--dex"],
                        capture_output=True, text=True, timeout=30)
-    return json.loads(p.stdout) if p.returncode == 0 else []
+    if p.returncode != 0:
+        print(f"[dmg] could not read the dex: {p.stderr[:160]}")
+        return {}
+    return json.loads(p.stdout)
 
 
 def _stones():
     """stone -> mega forme, read out of the calculator's own tables."""
-    p = subprocess.run(["node", CALC_JS, DATA_JS, "--stones"],
+    p = subprocess.run(["node", CALC_JS, DATA_DIR, "--stones"],
                        capture_output=True, text=True, timeout=30)
     return json.loads(p.stdout) if p.returncode == 0 else {}
 
 
 def _call(attackers, defenders):
     req = {"format": FORMAT, "attackers": attackers, "defenders": defenders}
-    p = subprocess.run(["node", CALC_JS, DATA_JS], input=json.dumps(req),
+    p = subprocess.run(["node", CALC_JS, DATA_DIR], input=json.dumps(req),
                        capture_output=True, text=True, timeout=30)
     if p.returncode:
         print(f"[dmg] calc failed: {p.stderr[:200]}")
