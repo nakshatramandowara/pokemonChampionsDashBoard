@@ -320,6 +320,41 @@ def save_note(slug, text):
             NOTES.pop(slug, None)
         json.dump(NOTES, open(NOTES_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=0)
 
+# ---- notes on a whole enemy team ------------------------------------------
+# Keyed by the six Pokemon themselves, not by any teamsheet match, so a team the
+# finder has never seen still gets notes. Sorted, so team-preview order does not
+# matter. A Pokemon we failed to recognise contributes its sprite label instead,
+# which keeps the key stable for that same unrecognised team.
+TEAM_NOTES_FILE = "teamnotes.json"
+TEAM_NOTES = (json.load(open(TEAM_NOTES_FILE, encoding="utf-8"))
+              if os.path.exists(TEAM_NOTES_FILE) else {})
+_tnotes_lock = threading.Lock()
+
+def team_key(cards):
+    if not cards:
+        return ""
+    parts = [(c.get("slug") or ("?" + str(c.get("label", "")))) for c in cards]
+    return "|".join(sorted(parts))
+
+def team_label(cards):
+    """Human-readable version of the key, for the notes header."""
+    out = []
+    for c in cards:
+        d = c.get("data") or {}
+        out.append(d.get("name") or c.get("slug") or "?")
+    return " / ".join(out)
+
+def save_team_note(key, text):
+    if not key:
+        return
+    with _tnotes_lock:
+        if text.strip():
+            TEAM_NOTES[key] = text
+        else:
+            TEAM_NOTES.pop(key, None)
+        json.dump(TEAM_NOTES, open(TEAM_NOTES_FILE, "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=0)
+
 _ROW_CACHE = {}
 MAX_WORKERS = 4
 def battle_rows(slug, fmt=FORMAT):
@@ -568,13 +603,18 @@ def condition(d, a):
         # priority chips re-derived from the conditioned list
         d["head"] = [(nm, p, "", MOVE_PRIORITY[nm]) for nm, p, _, _ in mv
                      if MOVE_PRIORITY.get(nm)][:4]
+        # extract() keeps priority moves OUT of the grid because they are shown
+        # as header chips; the conditioned path has to do the same or they
+        # render twice (Extreme Speed appearing as both chip and grid cell).
+        promoted = {h[0] for h in d["head"]}
+        d["moves"] = [m for m in mv if m[0] not in promoted]
     return d
 
 # ================================================================ DAMAGE
 # Every spread, every enemy forme and both of my mega states in one pass
 # (~700ms worst case), started in the background so cards render immediately.
 # The page then holds the whole grid and every toggle is a local lookup.
-_DMG = {"key": None, "ready": False, "grids": []}
+_DMG = {"key": None, "ready": False, "grids": [], "rev": [], "hp": {}}
 _dmg_lock = threading.Lock()
 
 def _enemy_specs(cards):
@@ -593,8 +633,27 @@ def _enemy_specs(cards):
             "spreads": d.get("spread_rows") or [],
             "megas": [{"name": i["forme"], "base": i["bs"]}
                       for _s, i in DEX_MEGAS.get(dexname, [])],
+            # both scopes' move lists: conditioning can swap the grid entirely,
+            # and either one may be on screen when a move is clicked
+            "moves": _enemy_moves(c),
         })
     return specs
+
+def _enemy_moves(card):
+    """Every move name that could appear in this card's grid, in either scope."""
+    names = []
+    for blob in (card.get("data"), card.get("gdata")):
+        if not blob:
+            continue
+        for entry in blob.get("moves", []):
+            n = entry[0]
+            if n and n not in names and not is_status(n):
+                names.append(n)
+        for entry in blob.get("head", []):
+            n = entry[0]
+            if n and n not in names and not is_status(n):
+                names.append(n)
+    return names
 
 def _damage_worker(key, cards):
     specs = _enemy_specs(cards)
@@ -604,17 +663,27 @@ def _damage_worker(key, cards):
         try:
             computed = damage.compute_all(real)
         except Exception as e:
-            print(f"[dmg] compute failed: {e}")
+            print(f"[dmg] outgoing failed: {e}")
             computed = []
-        it = iter(computed)
+        try:
+            incoming = damage.compute_incoming(real)
+        except Exception as e:
+            print(f"[dmg] incoming failed: {e}")
+            incoming = []
+        it, it2 = iter(computed), iter(incoming)
         grids = [next(it, {}) if s else {} for s in specs]
+        rev = [next(it2, {}) if s else {} for s in specs]
     else:
         grids = [{} for _s in specs]
+        rev = [{} for _s in specs]
     with _dmg_lock:
         if _DMG["key"] == key:
             _DMG["grids"] = grids
+            _DMG["rev"] = rev
+            _DMG["hp"] = damage.team_hp()
             _DMG["ready"] = True
-            print(f"[dmg] ready for {key}")
+            moves = sum(len(v) for g in rev for v in g.values())
+            print(f"[dmg] ready for {key} ({moves} move readings)")
 
 def start_damage(key, cards):
     if not DAMAGE_ON:
@@ -622,7 +691,7 @@ def start_damage(key, cards):
     with _dmg_lock:
         if _DMG["key"] == key:
             return                       # already done or in flight for this shot
-        _DMG.update(key=key, ready=False, grids=[])
+        _DMG.update(key=key, ready=False, grids=[], rev=[], hp={})
     threading.Thread(target=_damage_worker, args=(key, cards), daemon=True).start()
 
 # ================================================================ SCAN
@@ -679,13 +748,18 @@ def usage_color(p, dark=False):
     return f"hsl({p * 1.2:.0f} {'72% 40%' if dark else '80% 63%'})"
 
 def _move_cell(n, p, status, tag="", g=None):
+    """A move in the enemy's grid. Damaging moves are clickable: they reveal
+    what that move does to my six, in raw HP."""
     col = usage_color(p, dark=status)
     w = min(100, p) if p is not None else 0
     cls = "mv" + (" status" if status else "") + (" xfmt" if tag else "")
     sup = f'<sup class="fmt">{tag}</sup>' if tag else ""
     # tick sits at the global usage, so the gap to the bar edge IS the divergence
     tick = f'<u style="left:{min(100, g):.0f}%"></u>' if g is not None else ""
-    return (f'<span class="{cls}"><span class="mvn" style="color:{col}">{n}{sup}</span>'
+    hook = "" if status else f' data-mv="{html.escape(n, quote=True)}" onclick="pickMove(this)"'
+    if not status:
+        cls += " hit"
+    return (f'<span class="{cls}"{hook}><span class="mvn" style="color:{col}">{n}{sup}</span>'
             f'<span class="mvb"><i style="width:{w}%;background:{col}"></i>{tick}</span></span>')
 
 def neg_row(negs, lab="absent"):
@@ -704,7 +778,13 @@ def head_chips(head, cls=""):
         col = usage_color(p, dark=status)
         c = "pchip" + (" status" if status else "") + (" prio" if pr else "") + (" xfmt" if tag else "")
         badge = (f'<em>+{pr}</em>' if pr else "") + (f'<sup class="fmt">{tag}</sup>' if tag else "")
-        out += f'<span class="{c}" style="color:{col}">{n}{badge}</span>'
+        # priority moves live up here rather than in the grid, but a damaging
+        # one still needs to open the incoming row
+        hook = ""
+        if not status:
+            c += " hit"
+            hook = f' data-mv="{html.escape(n, quote=True)}" onclick="pickMove(this)"'
+        out += f'<span class="{c}" style="color:{col}"{hook}>{n}{badge}</span>'
     return f'<div class="pwrap {cls}">{out}</div>'
 
 def cent(n, p, g=None, cnt=None, tot=None):
@@ -818,6 +898,7 @@ def _variant(d, cls):
     moves = "".join(_move_cell(n, p, is_status(n), tag, g)
                     for n, p, tag, g in d["moves"][:MOVE_CAP]) or '<span class="nd">no move data</span>'
     return (f'<div class="{cls}"><div class="moves">{moves}</div>'
+            f'<div class="revrow" hidden></div>'
             f'{neg_row(d.get("moves_neg", []), "not run")}'
             f'<div class="detail">{detail}</div></div>')
 
@@ -896,9 +977,27 @@ def _finder_status(fin):
         return f'<span class="fstat off">no team ran this exact six &mdash; global{tail}</span>'
     return f'<span class="fstat on">n = {n}{tail}</span>'
 
+def team_note_panel(cards):
+    """Notes for this exact six, independent of whether a teamsheet matched."""
+    if not cards:
+        return "", False
+    key = team_key(cards)
+    val = html.escape(TEAM_NOTES.get(key, ""))
+    has = bool(TEAM_NOTES.get(key))
+    panel = (f'<div class="tnwrap" hidden><div class="tnhead">'
+             f'<span class="tnlab">Team notes</span>'
+             f'<span class="tnwho">{html.escape(team_label(cards))}</span></div>'
+             f'<textarea class="tnarea" data-key="{html.escape(key, quote=True)}" '
+             f'placeholder="How this team plays, what it led with, what to watch for&hellip;"'
+             f'>{val}</textarea></div>')
+    return panel, has
+
 def page(version):
     shot, cards, fin = scan()
     tcol = json.dumps(TYPE_COLORS)          # damage chips are coloured by move type
+    tnote, tnote_has = team_note_panel(cards)
+    tnbtn = (f'<button class="laybtn{" on" if tnote_has else ""}" id="tnbtn" '
+             f'onclick="toggleTeamNote()">&#9998; Team</button>') if cards else ""
     body = (f'<div class="grid">{"".join(card_html(c, i) for i, c in enumerate(cards))}</div>'
             if shot else '<p class="empty">No screenshot yet — tap the MacroDroid button.</p>')
     meta = shot if shot else "waiting"
@@ -1012,16 +1111,50 @@ span.cbadge.vglobal{{display:none}}
 .smb{{display:block;height:5px;background:var(--inset);border-radius:3px;overflow:hidden;margin-top:5px}}
 .smb i{{display:block;height:100%;background:#4a7fae}}
 .dmgwrap{{margin-top:12px;border-top:1px solid var(--line);padding-top:11px}}
-.dmgrow{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px 16px}}
+.dmgrow{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 16px}}
 .dmgwait{{color:var(--dim);font:11px var(--mono)}}
 .dmgcell{{display:flex;align-items:center;gap:7px;min-width:0}}
 .dmgname{{font:600 11px var(--f);color:var(--dim);white-space:nowrap;flex:0 0 auto}}
 .dmgmvs{{display:flex;align-items:center;gap:4px;margin-left:auto}}
 .dmgmv{{font:700 10.5px/1 var(--mono);border-radius:5px;padding:3px 6px;
   min-width:30px;text-align:center;cursor:help}}
-.dmgms{{cursor:pointer;color:var(--dim);font-size:9px;flex:none;user-select:none}}
+.dmgms{{cursor:pointer;color:var(--dim);font-size:12px;line-height:1;flex:none;
+  user-select:none;display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;margin:-7px -5px -7px -7px;border-radius:6px;
+  transition:background .12s,color .12s}}
+.dmgms:hover{{background:rgba(255,157,77,.14);color:var(--warn)}}
+.dmgms:active{{background:rgba(255,157,77,.26)}}
 .dmgms.on{{color:var(--warn)}}
 .dmgbtn.hasnote{{color:var(--warn);border-color:var(--warn)}}
+.mv.hit{{cursor:pointer}}
+.pchip.hit{{cursor:pointer}}
+.pchip.hit:hover{{border-color:var(--accent)}}
+.pchip.sel{{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}}
+.mv.hit:hover{{border-color:var(--accent)}}
+.mv.sel{{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}}
+.tnwrap{{max-width:1760px;margin:16px auto -2px;padding:0 22px}}
+.tnhead{{display:flex;align-items:baseline;gap:10px;margin-bottom:7px}}
+.tnlab{{font:700 9.5px var(--f);color:var(--dim);text-transform:uppercase;letter-spacing:.09em}}
+.tnwho{{font:11px var(--mono);color:var(--dim);opacity:.75;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}}
+.tnarea{{width:100%;min-height:84px;resize:vertical;background:var(--panel);color:var(--ink);
+  border:1px solid var(--line);border-radius:10px;padding:11px 13px;font:13px/1.55 var(--f)}}
+.tnarea:focus{{outline:none;border-color:var(--accent)}}
+.tnarea::placeholder{{color:var(--dim)}}
+.revrow[hidden]{{display:none}}
+.revrow{{display:flex;flex-wrap:wrap;align-items:baseline;gap:5px 14px;
+  margin:-6px 0 12px;padding:8px 10px;background:var(--inset);
+  border:1px solid var(--line);border-radius:8px}}
+.revlab{{font:700 8.5px var(--f);color:var(--dim);text-transform:uppercase;
+  letter-spacing:.09em;width:100%;margin-bottom:-2px;display:flex;align-items:center}}
+.revx{{margin-left:auto;cursor:pointer;font:400 15px/1 var(--f);color:var(--dim);
+  width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;
+  margin-top:-5px;margin-right:-4px;border-radius:5px}}
+.revx:hover{{color:var(--ink);background:rgba(255,255,255,.07)}}
+.revc{{display:flex;align-items:baseline;gap:5px;font:11.5px var(--mono)}}
+.revc span{{color:var(--dim);font:600 11px var(--f)}}
+.revc b{{font-weight:700}}
+.revc u{{text-decoration:none;color:var(--dim);font-size:9.5px}}
 .spr-pick{{cursor:pointer;border-radius:5px;padding:1px 4px;margin:0 -4px 5px}}
 .spr-pick:hover{{background:rgba(84,214,191,.10)}}
 .spr-pick.sel{{background:rgba(84,214,191,.15)}}
@@ -1032,9 +1165,10 @@ span.cbadge.vglobal{{display:none}}
 <span class="hdr-right"><button class="laybtn" id="rbtn" onclick="rebuild(event)"
   title="update teamsheets — alt/shift-click for a full re-fetch">&#8635; teams</button>
 <button class="laybtn" id="gbtn" onclick="setAllScope()">all global</button>
-<button class="laybtn" id="allnotes" onclick="toggleAllNotes()">&#9998; All notes</button>
+{tnbtn}<button class="laybtn" id="allnotes" onclick="toggleAllNotes()">&#9998; All notes</button>
 <button class="laybtn" id="lay" onclick="toggleLayout()">3 &times; 2</button>
 <span class="live"><span class="dot"></span>live</span></span></header>
+{tnote}
 {body}
 <script>
 const V={version};let reloading=false;let building=false;
@@ -1068,7 +1202,8 @@ setInterval(async()=>{{if(building)return;try{{const r=await fetch('/version?t='
 function setScope(card,g){{card.classList.toggle('gs',g);
   try{{localStorage.setItem('gs:'+card.dataset.slug,g?'1':'0');}}catch(e){{}}
   if(card.dataset.megas)applyForm(card);}}
-function toggleScope(el){{const c=el.closest('.card');setScope(c,!c.classList.contains('gs'));}}
+function toggleScope(el){{const c=el.closest('.card');setScope(c,!c.classList.contains('gs'));
+  repaintOpenReverse(c);}}
 function setAllScope(){{const cards=document.querySelectorAll('.card .cbadge.sw.vlocal');
   // if anything is still local, push everything global; otherwise pull everything back
   let anyLocal=false;
@@ -1080,6 +1215,18 @@ function setAllScope(){{const cards=document.querySelectorAll('.card .cbadge.sw.
 (function(){{document.querySelectorAll('.card').forEach(function(c){{
   if(!c.querySelector('.cbadge.sw'))return;
   try{{if(localStorage.getItem('gs:'+c.dataset.slug)==='1')c.classList.add('gs');}}catch(e){{}}}});}})();
+function toggleTeamNote(){{const w=document.querySelector('.tnwrap');if(!w)return;
+  const b=document.getElementById('tnbtn');
+  if(w.hasAttribute('hidden')){{w.removeAttribute('hidden');
+    const t=w.querySelector('textarea');t.focus();
+    t.setSelectionRange(t.value.length,t.value.length);}}
+  else{{w.setAttribute('hidden','');
+    if(b)b.classList.toggle('on',!!w.querySelector('textarea').value.trim());}}}}
+async function saveTeamNote(t){{try{{await fetch('/teamnote',{{method:'POST',
+  headers:{{'Content-Type':'application/json'}},
+  body:JSON.stringify({{key:t.dataset.key,text:t.value}})}});
+  const b=document.getElementById('tnbtn');
+  if(b)b.classList.toggle('on',!!t.value.trim());}}catch(e){{}}}}
 let notesOpen=false;
 function toggleAllNotes(){{notesOpen=!notesOpen;
   document.querySelectorAll('.notewrap').forEach(function(w){{if(notesOpen)w.removeAttribute('hidden');else w.setAttribute('hidden','');}});
@@ -1118,14 +1265,14 @@ function loadForm(card){{try{{const s=JSON.parse(localStorage.getItem('mega:'+ca
 function toggleStone(el){{const card=el.closest('.card');const v=el.dataset.v;
   if(card.dataset.on==='1'&&card.dataset.v===v){{card.dataset.on='0';}}
   else{{card.dataset.on='1';card.dataset.v=v;}}
-  applyForm(card);saveForm(card);paintDamage(card);
+  applyForm(card);saveForm(card);paintDamage(card);repaintOpenReverse(card);
   const w=card.querySelector('.statwrap');if(w)w.removeAttribute('hidden');}}
 (function(){{document.querySelectorAll('.card[data-megas]').forEach(function(c){{loadForm(c);applyForm(c);}});}})();
 /* ---- damage ------------------------------------------------------------
    DMG[cardIndex][spreadIndex + ':' + enemyForme][myMegaScope] -> six cells.
    The server computes every combination once, so nothing here refetches.
    myMegaOff holds the names I have chosen NOT to mega. */
-let DMG=null,dmgLoaded=false,myMegaOff=new Set();
+let DMG=null,REV=null,MYHP=null,dmgLoaded=false,myMegaOff=new Set();
 try{{myMegaOff=new Set(JSON.parse(localStorage.getItem('nomega')||'[]'));}}catch(e){{}}
 function dcolor(p){{p=Math.max(0,Math.min(150,p));return 'hsl('+(p*0.8).toFixed(0)+' 80% 63%)';}}
 // The type palette spans Electric (#f4cf3c, very light) to Dark (#6a6480), so no
@@ -1184,10 +1331,64 @@ function paintDamage(card){{
   }}
   row.innerHTML=html;}}
 function paintAllDamage(){{document.querySelectorAll('.card[data-ei]').forEach(paintDamage);}}
+/* ---- incoming: what one enemy move does to my six, in raw HP ---------- */
+function hpcolor(dmg,max){{const f=Math.max(0,Math.min(1,dmg/(max||1)));
+  return 'hsl('+((1-f)*110).toFixed(0)+' 80% 63%)';}}
+// Which variant block is on screen. Priority chips sit in the card header,
+// outside both blocks, so a chip click has to be routed to the visible one.
+function activeBlock(card){{
+  return card.querySelector('.vonly')
+      || card.querySelector(card.classList.contains('gs')?'.vglobal':'.vlocal');}}
+function pickMove(el){{
+  const card=el.closest('.card');
+  // careful: the priority chips live in a wrapper that also carries the
+  // vlocal/vglobal class, and that wrapper has no row of its own
+  let block=el.closest('.vlocal,.vglobal,.vonly');
+  if(!block||!block.querySelector('.revrow'))block=activeBlock(card)||card;
+  const row=block.querySelector('.revrow');if(!row)return;
+  const move=el.dataset.mv;
+  const already=el.classList.contains('sel');
+  card.querySelectorAll('.mv.sel,.pchip.sel').forEach(function(m){{m.classList.remove('sel');}});
+  if(already){{row.setAttribute('hidden','');return;}}
+  el.classList.add('sel');
+  row.removeAttribute('hidden');
+  if(!reverseReady()){{
+    row.innerHTML='<span class="revlab">calculating&hellip;</span>';return;}}
+  if(!REV[card.dataset.ei]){{
+    row.innerHTML='<span class="revlab">'+move+'</span>'
+      +'<span class="revc"><span>no data for this Pokemon</span></span>';return;}}
+  const perMove=REV[card.dataset.ei][spreadIndex(card)+':'+enemyForme(card)];
+  const scopes=perMove&&perMove[move];
+  if(!scopes){{
+    row.innerHTML='<span class="revlab">'+move+'</span>'
+      +'<span class="revc"><span>no damage</span></span>';return;}}
+  let html='<span class="revlab">'+move+' &rarr; my team'
+    +'<span class="revx" onclick="closeReverse(this)" title="close">&times;</span></span>';
+  const on=scopes.on||[],off=scopes.off||[];
+  for(let i=0;i<on.length;i++){{
+    const useMega=!myMegaOff.has(on[i][0]);
+    const cell=(useMega?on:off)[i]||on[i];
+    const max=(MYHP&&MYHP[cell[0]])||0;
+    html+='<span class="revc"><span>'+cell[0]+'</span>'
+      +'<b style="color:'+hpcolor(cell[1],max)+'">'+cell[1]+'</b>'
+      +(max?'<u>/'+max+'</u>':'')+'</span>';
+  }}
+  row.innerHTML=html;}}
+function closeReverse(el){{
+  const card=el.closest('.card');
+  const row=el.closest('.revrow');
+  if(row)row.setAttribute('hidden','');
+  card.querySelectorAll('.mv.sel,.pchip.sel').forEach(function(m){{m.classList.remove('sel');}});}}
+function repaintOpenReverse(card){{
+  // pickMove toggles, so clear the flag first or a repaint would close the row
+  card.querySelectorAll('.mv.sel,.pchip.sel').forEach(function(m){{
+    m.classList.remove('sel');pickMove(m);}});}}
+function reverseReady(){{return REV!==null&&MYHP!==null;}}
 function toggleMyMega(name){{
   if(myMegaOff.has(name))myMegaOff.delete(name);else myMegaOff.add(name);
   try{{localStorage.setItem('nomega',JSON.stringify([...myMegaOff]));}}catch(e){{}}
-  paintAllDamage();}}
+  paintAllDamage();
+  document.querySelectorAll('.card[data-ei]').forEach(repaintOpenReverse);}}
 // Delegated. The diamond carries only its index, so no Pokemon name is ever
 // spliced into an HTML attribute -- that nesting broke the whole script, and
 // would break again on a name like Farfetch'd.
@@ -1202,22 +1403,28 @@ function pickSpread(el){{const card=el.closest('.card'),si=el.dataset.si;
   // both the local and global blocks carry spread cells; keep them in step
   card.querySelectorAll('.spr-pick').forEach(function(s){{
     s.classList.toggle('sel',s.dataset.si===si);}});
-  paintDamage(card);}}
+  paintDamage(card);repaintOpenReverse(card);}}
 function toggleDmg(b){{const w=b.closest('.card').querySelector('.dmgwrap');if(!w)return;
   if(w.hasAttribute('hidden')){{w.removeAttribute('hidden');b.classList.add('hasnote');
     paintDamage(b.closest('.card'));}}
   else{{w.setAttribute('hidden','');b.classList.remove('hasnote');}}}}
 async function loadDamage(){{if(dmgLoaded)return;
   try{{const j=await(await fetch('/damage?t='+Date.now(),{{cache:'no-store'}})).json();
-    if(!j.ready)return;DMG=j.grids;dmgLoaded=true;paintAllDamage();}}catch(e){{}}}}
+    if(!j.ready)return;DMG=j.grids;REV=j.rev||[];MYHP=j.hp||{{}};dmgLoaded=true;
+    paintAllDamage();
+    // a move clicked while the background pass was still running left its row
+    // reading "calculating..."; redraw those now that the data is here
+    document.querySelectorAll('.card[data-ei]').forEach(repaintOpenReverse);
+  }}catch(e){{}}}}
 
 async function saveNote(t){{try{{await fetch('/note',{{method:'POST',
   headers:{{'Content-Type':'application/json'}},
   body:JSON.stringify({{slug:t.dataset.slug,text:t.value}})}});
   t.closest('.card').querySelector('.notebtn').classList.toggle('hasnote',!!t.value.trim());
 }}catch(e){{}}}}
-document.addEventListener('focusout',e=>{{if(e.target.classList.contains('notearea')&&!reloading)
-  saveNote(e.target);}});
+document.addEventListener('focusout',e=>{{if(reloading)return;
+  if(e.target.classList.contains('notearea'))saveNote(e.target);
+  else if(e.target.classList.contains('tnarea'))saveTeamNote(e.target);}});
 </script>
 </body></html>"""
 
@@ -1252,9 +1459,17 @@ def version():
 @app.route("/damage")
 def damage_grid():
     with _dmg_lock:
-        r = jsonify(ready=_DMG["ready"], key=_DMG["key"], grids=_DMG["grids"])
+        r = jsonify(ready=_DMG["ready"], key=_DMG["key"], grids=_DMG["grids"],
+                    rev=_DMG["rev"], hp=_DMG["hp"])
     r.headers["Cache-Control"] = "no-store"
     return r
+
+@app.route("/teamnote", methods=["POST"])
+def teamnote():
+    j = request.get_json(force=True, silent=True) or {}
+    if j.get("key"):
+        save_team_note(j["key"], j.get("text", ""))
+    return jsonify(ok=True)
 
 @app.route("/note", methods=["POST"])
 def note():

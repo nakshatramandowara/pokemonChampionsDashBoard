@@ -210,6 +210,99 @@ def _call(attackers, defenders):
     return r
 
 
+def team_hp():
+    """{my Pokemon: max HP} -- lets the page colour raw damage by how close it
+    is to lethal without shipping the HP on every cell."""
+    return {m["name"]: m["stats"]["hp"] for m in _TEAM}
+
+
+def compute_incoming(enemies):
+    """What each enemy move does to MY six, in raw HP.
+
+    Same shape as compute_all but with the roles swapped: the opponent attacks,
+    I defend. Their ability and item stay unmodelled (INERT, no item) exactly as
+    they are when I attack them -- only their typing, stats, spread and nature
+    are known. My side keeps its real ability and item, which matter defensively
+    for Assault Vest and the like.
+
+    enemies: as compute_all, plus "moves": [move names to try]
+
+    Returns, per enemy:
+        result[enemy][defender_variant][move name][my_mega_scope] -> six entries
+    where each entry is [my Pokemon, damage in HP]. Moves that cannot damage
+    anyone (status, immunities) are omitted entirely, so the page can grey out
+    anything missing from the grid.
+    """
+    if not _TEAM or not enemies:
+        return []
+
+    # --- attackers: every spread x forme the page can select, carrying its moves
+    attackers, index_of = [], {}
+    for enemy_i, enemy in enumerate(enemies):
+        move_names = [m for m in (enemy.get("moves") or []) if m]
+        if not move_names:
+            continue
+        formes = [("b", enemy["name"], enemy["base"])]
+        for mega_i, mega in enumerate(enemy.get("megas") or []):
+            formes.append((str(mega_i), mega["name"], mega["base"]))
+
+        for spread_i, spread in enumerate(enemy.get("spreads") or [{"points": {}}]):
+            for forme_key, forme_name, forme_base in formes:
+                index_of[(enemy_i, f"{spread_i}:{forme_key}")] = len(attackers)
+                attackers.append({
+                    "name": forme_name, "ability": INERT, "item": "",
+                    "stats": enemy_stats(forme_base, spread.get("points", {}),
+                                         enemy.get("nature")),
+                    "moves": move_names,
+                })
+
+    if not attackers:
+        return [{} for _ in enemies]
+
+    # --- defenders: my six, in both mega states (a mega changes my bulk too)
+    defenders, defender_of = [], {}
+    for scope in ("on", "off"):
+        for member_i, member in enumerate(_TEAM):
+            use = member["mega"] if (scope == "on" and "mega" in member) else member
+            defender_of[(scope, member_i)] = len(defenders)
+            defenders.append({
+                "name": use["name"], "ability": use.get("ability", INERT),
+                "item": member["item"], "stats": use["stats"],
+            })
+
+    response = _call(attackers, defenders)
+
+    by_pair = {}
+    for row in response["results"]:
+        if row["max"] <= 0:
+            continue
+        by_pair[(row["atk"], row["def"], row["move"])] = row
+
+    output = []
+    for enemy_i, enemy in enumerate(enemies):
+        grid = {}
+        for (which_enemy, variant), attacker_i in index_of.items():
+            if which_enemy != enemy_i:
+                continue
+            per_move = {}
+            for move_name in attackers[attacker_i]["moves"]:
+                scopes, any_damage = {}, False
+                for scope in ("on", "off"):
+                    cells = []
+                    for member_i, member in enumerate(_TEAM):
+                        row = by_pair.get(
+                            (attacker_i, defender_of[(scope, member_i)], move_name))
+                        cells.append([member["name"], round(row["avg"]) if row else 0])
+                        any_damage = any_damage or bool(row)
+                    scopes[scope] = cells
+                if any_damage:
+                    per_move[move_name] = scopes
+            grid[variant] = per_move
+        output.append(grid)
+
+    return output
+
+
 def compute_all(enemies):
     """Damage for every combination, in a single call to the calculator.
 
