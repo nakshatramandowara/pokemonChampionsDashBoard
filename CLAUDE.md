@@ -21,6 +21,11 @@ Pokémon and shows moves / items / abilities / spreads / damage calcs per card.
   (`Hisuian Arcanine`). `_REGION_TOK` folds `hisuian`→`hisui` etc. so the token sets meet. Both halves
   broke silently once — startup now prints the sprite form/base split as a tripwire.
 - Name bridge matches by **token set**, not string (Limitless word order varies: "Wash Rotom" vs `rotom-wash`). Order: norm → `_ALIAS` → exact tokens → superset with only `_NOISE` extras and exactly one candidate → species fallback (logs `[bridge] LOOSE`).
+- **A refresh must do everything a restart does.** `DEX_NAME` is keyed by index slug, so when the
+  index renames or adds slugs a stale table makes `_enemy_specs` drop those mons on `if not dexname`
+  — no damage rows, no log line. `_auto_refresh_loop` therefore re-runs `_audit_sprites()` and
+  `_init_damage()`. `_init_damage()` is idempotent by building locals and rebinding; never go back to
+  mutating `DEX_MEGAS` in place, as `setdefault().append()` duplicates every stone on a second call.
 - **Cache saves must be atomic** (`.tmp` + `os.replace`) — the dashboard hot-reloads on mtime.
 - **JS stubs in the Node bridge must stay falsy/minimal.** A truthy jQuery stub once applied phantom Ruin abilities (−25% damage) silently.
 - Sprite recognition: SIZE=64, raw Euclidean distance, composite onto red `(133,2,52)` background. Don't "improve" to 128 or cosine.

@@ -165,7 +165,9 @@ print(f"Index: {len(BY_SLUG)} Pokemon. Refs: {len(_labels)}. Format: {FORMAT}")
 def _audit_sprites():
     """Resolve every form sprite once at startup. When the index renamed its slugs at M-C
     every regional form silently collapsed onto its base species; this is the line that
-    makes the next such change visible instead of silent."""
+    makes the next such change visible instead of silent. Re-run after an index refresh,
+    so it starts from an empty miss list rather than the previous index's."""
+    _form_miss.clear()
     forms = fell = 0
     for lbl in _labels:
         if "_shiny" in lbl:
@@ -193,6 +195,10 @@ DEX_NAME = {}          # index slug        -> Champions dex name
 DEX_MEGAS = {}         # Champions dex name -> [(stone, info)], X before Y
 
 def _init_damage():
+    """Safe to call again when the index is refreshed. Both tables are built in locals and
+    rebound at the end, so a request thread never reads a half-filled dict -- and DEX_MEGAS
+    cannot accumulate, which a plain re-run would do since it appends per stone."""
+    global DEX_NAME, DEX_MEGAS
     try:
         dex = damage.dex_names()
         stones = damage._stones()
@@ -204,19 +210,22 @@ def _init_damage():
         return False
 
     resolve = bridge.build(dex)
-    base_by_dex, misses = {}, []
+    names, megas, base_by_dex, misses = {}, {}, {}, []
     for e in INDEX.get("pokemon", []):
         hit, _how = resolve(e.get("name", ""))
         if hit is None:
             misses.append(f"{e.get('slug')} ({e.get('name')})")
             continue
-        DEX_NAME[e["slug"]] = hit
+        names[e["slug"]] = hit
         base_by_dex[hit] = (e.get("summary", {}) or {}).get("baseStats", {})
 
     for stone, info in stones.items():
-        DEX_MEGAS.setdefault(info["base"], []).append((stone, info))
-    for base in DEX_MEGAS:                       # X before Y, matching _megas_of
-        DEX_MEGAS[base].sort(key=lambda si: ("X" not in si[0], "Y" not in si[0]))
+        megas.setdefault(info["base"], []).append((stone, info))
+    for base in megas:                           # X before Y, matching _megas_of
+        megas[base].sort(key=lambda si: ("X" not in si[0], "Y" not in si[0]))
+
+    # one rebind each; keep the old tables until both are complete
+    DEX_NAME, DEX_MEGAS = names, megas
 
     print(f"[dmg] bridged {len(DEX_NAME)}/{len(INDEX.get('pokemon', []))} index names")
     if misses:
@@ -337,7 +346,7 @@ def slug_to_key(slug):
 
 def _auto_refresh_loop():
     """Every REFRESH_DAYS: re-pull the index and drop the per-Pokemon battle cache."""
-    global INDEX, BY_SLUG, VERSION
+    global INDEX, BY_SLUG, VERSION, DAMAGE_ON
     if REFRESH_DAYS <= 0:
         return
     while True:
@@ -347,6 +356,13 @@ def _auto_refresh_loop():
             INDEX = data
             BY_SLUG = {e["slug"]: e for e in data.get("pokemon", [])}
             _ROW_CACHE.clear()                 # force fresh battle-data fetches
+            # A refreshed index has to go through everything a fresh start does. DEX_NAME
+            # is keyed by index slug, so when the index renamed every regional slug at M-C
+            # a long-running server would have kept the old table and _enemy_specs would
+            # have dropped each renamed mon on `if not dexname` -- no damage rows and no
+            # log line. Re-bridging here is what makes a refresh equal a restart.
+            _audit_sprites()
+            DAMAGE_ON = _init_damage()
             finder_if_changed()                # and pick up any teamsheet rebuild
             with _lock:
                 VERSION += 1                   # nudge browsers to reload

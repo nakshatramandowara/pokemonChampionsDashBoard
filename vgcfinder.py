@@ -108,8 +108,13 @@ NOT_STONES = {"eviolite"}          # ends in -ite but is not a Mega Stone
 def is_stone(name):
     """Mega Stones all end in -ite ('Charizardite Y'). The previous check looked
     for the words 'mega' and 'stone', which no real item name contains, so the
-    flag was always False."""
-    core = re.sub(r"\b[xy]\b", "", (name or "").lower())
+    flag was always False.
+
+    The designator has to be stripped before the -ite test or it hides the ending.
+    M-C added a third one, Z ('Absolite Z'), which is the same blind spot the stone
+    regex in champcalc.js had. No Champions item ends in a bare Z without being a
+    stone, so widening this cannot catch anything else."""
+    core = re.sub(r"\b[xyz]\b", "", (name or "").lower())
     core = re.sub(r"[^a-z]", "", core)
     return bool(core) and core.endswith("ite") and core not in NOT_STONES
 
@@ -190,6 +195,15 @@ def build(fmt, limit=400, min_players=16, fresh=False, progress=None):
             by_id.update(t["id"] for t in fresh_ones)
             tours += fresh_ones
             note(f"  {src}: {len(got)} events, {len(fresh_ones)} new")
+            # The API returns the most recent `limit` events. Once a tag produces more
+            # than that within the regulation, the oldest M-C events fall off the back
+            # silently. Filling the limit AND never reaching back past the cutoff is
+            # exactly that case -- at ~8 events/day, CUSTOM crosses 400 around November.
+            oldest = min((t.get("date") or "") for t in got) if got else ""
+            if len(got) >= limit and oldest >= alias["since"]:
+                note(f"  !! {src} filled the {limit}-event limit without reaching back to "
+                     f"{alias['since']} (oldest was {oldest[:10]}). Older {fmt} events are "
+                     f"being cut off -- re-run with a larger --limit to keep them.")
         before = len(tours)
         tours = [t for t in tours if (t.get("date") or "") >= alias["since"]]
         note(f"{fmt}: kept {len(tours)}/{before} events dated >= {alias['since']}")
