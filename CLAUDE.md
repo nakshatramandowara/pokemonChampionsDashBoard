@@ -8,18 +8,28 @@ Pokémon and shows moves / items / abilities / spreads / damage calcs per card.
 - `pokedashboard.py` — Flask server, sprite recognition, cards, damage grid. Imports `vgcfinder` as a library.
 - `vgcfinder.py` — builds `vgcfinder_cache.json` from Limitless teamsheets (`play.limitlesstcg.com/api`); also a CLI.
 - `damage.py` + `bridge.py` → Node subprocess running `champcalc.js` (`champengine.js` unmodified, `champdata.js` = resolved Champions tables from nerd-of-now/NCP-VGC-Damage-Calculator).
+- `resolve_champdata.js` — regenerates `champdata.js` from an upstream `script_res` folder. Generated file; never hand-edit it.
 - Data: `index_cache.json` (championsbattledata.com usage), `dex_to_slug.json`, `myteam.json`, `notes.json`, `teamnotes.json`, sprites in `REF_DIR`.
 - Run: `python pokedashboard.py` (`--refresh` forces index re-download).
 
 ## Hard rules — do not change without asking
 - **Exact 6/6 teamsheet matching only.** All six mons are visible in team preview. No subset backoff.
 - **Never strip regional prefixes** when bridging names — it silently maps Alolan Raichu onto Raichu.
+  A regional form that will not resolve returns `None` (card shows no data); it never falls back to the base.
+- **Two naming schemes, both live.** championsbattledata.com switched to Showdown-style suffixes at M-C
+  (`ninetales-alola`, `tauros-paldea-aqua`, `farfetch-d`); Limitless still writes adjectives
+  (`Hisuian Arcanine`). `_REGION_TOK` folds `hisuian`→`hisui` etc. so the token sets meet. Both halves
+  broke silently once — startup now prints the sprite form/base split as a tripwire.
 - Name bridge matches by **token set**, not string (Limitless word order varies: "Wash Rotom" vs `rotom-wash`). Order: norm → `_ALIAS` → exact tokens → superset with only `_NOISE` extras and exactly one candidate → species fallback (logs `[bridge] LOOSE`).
 - **Cache saves must be atomic** (`.tmp` + `os.replace`) — the dashboard hot-reloads on mtime.
 - **JS stubs in the Node bridge must stay falsy/minimal.** A truthy jQuery stub once applied phantom Ruin abilities (−25% damage) silently.
 - Sprite recognition: SIZE=64, raw Euclidean distance, composite onto red `(133,2,52)` background. Don't "improve" to 128 or cosine.
 - CSS: `[hidden]{display:none}` must be explicit (`.revrow{display:flex}` overrides it).
-- Known and accepted: Basculegion / Meowstic-F always log LOOSE; Calyrex Shadow Rider and Ogerpon masks resolve wrong (n=1) — leave alone.
+- Known and accepted, all logged `[bridge] LOOSE`, never silent: the gender formes
+  (`indeedee-f`, `basculegion-f`, `meowstic-f`) collapse onto the base key because `vf.norm` strips ♀/♂;
+  so do gourgeist sizes, `maushold-four`, `lycanroc-midnight`, `squawkabilly-yellow`, `vivillon-fancy`.
+  Fixing the gender ones means changing `norm()` and rebuilding the cache. Calyrex/Ogerpon are no longer
+  in the index.
 
 ## Working style
 - Run a targeted diagnostic before changing code. No speculative refactors.
@@ -37,20 +47,23 @@ Partner prediction · top-finishes / placings display · subset backoff to 5 or 
 points), marked with an orange "g". Local/global are both rendered server-side and swapped by CSS
 class `.gs`; badge toggle persisted in localStorage `gs:<slug>`.
 
-## In progress: migrating to Regulation M-C (live Sep 9 – Dec 2, 2026)
-M-C keeps all M-B mons and adds new ones plus six Megas (Absol Z, Garchomp Z, Lucario Z, Salamence,
-Golisopod, Baxcalibur). New sprite PNGs are downloaded.
+## Regulation M-C (live Sep 9 – Dec 2, 2026) — migrated 2026-09-17
+Done, in this order. Each step has a commit; `31d4e17` is the pre-migration checkpoint.
 
-1. **Teamsheets.** Limitless has no `M-C` format ID yet; M-C events are tagged `CUSTOM` (and some `M-B`).
-   Plan: in `build()`, alias `M-C` → fetch `CUSTOM` + `M-B`, keep only events dated ≥ `2026-09-09`,
-   store cache format as `"M-C"`. Then `python vgcfinder.py build --format M-C` and set `TEAM_FORMAT="M-C"`.
-   The dashboard "teams" button rebuilds whatever format the cache holds, so the first M-C build must be CLI.
-   (`formats()` was patched to handle string/dict `formats` from `/games`.)
-2. **Sprites/index.** Restart with `--refresh`. Check `REF_DIR` — it's hardcoded to
-   `C:/Users/admin/Desktop/pokeicons` but this machine's user is `naksh`.
-3. **New PNG resolution.** Verify each new label → `label_to_slug` → in `BY_SLUG`, `DEX_NAME`, `slug_to_key`.
-   Likely gaps: `SUFFIX` lacks Toxtricity Low Key, Squawkabilly plumages, Z-Mega naming; `dex_to_slug.json` may lack new dex numbers.
-4. **Damage calc.** Watch startup for `[dmg] no dex match:`. If new mons/Megas are missing, re-resolve
-   `champdata.js` from the upstream calc's `script_res` — don't hand-edit it.
+1. **Regional slug regression** (`7a69813`). The index changed scheme at M-C, so all 21 form sprites
+   fell through to the base species — Alolan Ninetales was reading Fire instead of Ice/Fairy, silently.
+   `label_to_slug` now derives `base + "-" + tag` (the index slugifies its own display name) with
+   `FORM_FIX`/`BASE_FIX` for the handful that disagree. `_audit_sprites()` prints the split at startup.
+2. **champdata.js** (`0b3cfe1`). Regenerated from upstream `1369b359` ("Reg M-C sets") via the new
+   `resolve_champdata.js`. POKEDEX 315→346, stones 75→81, index→calc bridging 236→264 of 264.
+   The stone regex was `/ite( [XY])?$/` and silently dropped the three Z stones; now `[XYZ]`.
+3. **Teamsheets** (`488f0ce`). `ALIAS_FORMATS` defines M-C as CUSTOM+M-B dated ≥ 2026-09-09.
+   4887 teams / 73 events; 0.4% known contamination from one M-B event. `TEAM_FORMAT = "M-C"`.
+   Rebuild with `python vgcfinder.py build --format M-C --fresh`.
+   Drop the alias once Limitless adds a real M-C ID.
+4. **Bridging.** Teamsheet slots reachable from a dashboard slug: 29320/29322.
+
+`resolve_champdata.js` uses a *faithful* `$.extend` — that is correct and does not contradict the
+falsy-stub rule, which is about `champcalc.js` at runtime. The two stubs exist for opposite reasons.
 
 Game rules / legality / stats: verify against a current source before stating them.
