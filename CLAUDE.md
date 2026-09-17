@@ -26,6 +26,14 @@ Pokémon and shows moves / items / abilities / spreads / damage calcs per card.
   — no damage rows, no log line. `_auto_refresh_loop` therefore re-runs `_audit_sprites()` and
   `_init_damage()`. `_init_damage()` is idempotent by building locals and rebinding; never go back to
   mutating `DEX_MEGAS` in place, as `setdefault().append()` duplicates every stone on a second call.
+- **A 404 from the battle API is permanent; an empty 200 is not.** `_DEAD_ROWS` remembers 404s and
+  skips them until the next index refresh. The index lists entries the API never serves (`maushold`,
+  `floette`), and blind retrying one cost 8s of sleep *per scan* — a ten-second stall mid-battle.
+  HTTP 200 with zero rows is the opposite case, a soft rate-limit under a concurrent burst, and must
+  keep its backoff. Do not collapse the two back into one handler.
+- **`UNTAGGED_FORM`**: a species whose bare icon is a form, not the base entry. Maushold ships both
+  `Menu_CP_0925.png` and `…-Three.png`, so the bare file is Family of Four — the calculator separates
+  the two by weight alone (2.8kg vs 2.3kg), and only `maushold-four` has a battle endpoint.
 - **Cache saves must be atomic** (`.tmp` + `os.replace`) — the dashboard hot-reloads on mtime.
 - **JS stubs in the Node bridge must stay falsy/minimal.** A truthy jQuery stub once applied phantom Ruin abilities (−25% damage) silently.
 - Sprite recognition: SIZE=64, raw Euclidean distance, composite onto red `(133,2,52)` background. Don't "improve" to 128 or cosine.

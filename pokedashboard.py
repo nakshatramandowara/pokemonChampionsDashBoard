@@ -6,7 +6,7 @@ Run once:   python dashboard.py
   - Watch the dashboard at            http://localhost:5000/
 Each upload auto-reloads the dashboard within ~1s.  --refresh re-pulls the index.
 """
-import glob, os, re, json, io, base64, sys, time, threading, webbrowser, urllib.request, html, copy
+import glob, os, re, json, io, base64, sys, time, threading, webbrowser, urllib.request, urllib.error, html, copy
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import damage, bridge
@@ -105,6 +105,13 @@ FORM_FIX = {"Jumbo": "super",       # the index calls Gourgeist's biggest size S
             "Female": "f"}          # Meowstic / Basculegion / Indeedee
 # PokeAPI drops the apostrophe that the index writes as a hyphen.
 BASE_FIX = {"farfetchd": "farfetch-d", "sirfetchd": "sirfetch-d"}
+# Species whose UNTAGGED icon is a form rather than the base entry. Maushold ships both
+# Menu_CP_0925.png and Menu_CP_0925-Three.png, so the bare file is the Family of Four --
+# the calculator separates the two by weight alone, 2.8kg against the Three's 2.3kg, and
+# they are otherwise the same typing, stats and abilities. It matters because the index
+# serves the Four's usage under maushold-four while plain `maushold` has no battle
+# endpoint at all, so without this both icons landed on a permanently empty card.
+UNTAGGED_FORM = {"0925": "maushold-four"}
 # A regional form is a different Pokemon, not a skin, so it is NEVER resolved by falling
 # back to the base species -- that is exactly how Alolan Raichu quietly reads as Raichu.
 # If one fails to resolve the card shows no data and startup says so, loudly.
@@ -127,6 +134,8 @@ def label_to_slug(label):
     if base is None:
         return None
     base = BASE_FIX.get(base, base)
+    if tag is None and UNTAGGED_FORM.get(dex) in BY_SLUG:
+        return UNTAGGED_FORM[dex]
     for c in _candidates(tag, base):
         if c in BY_SLUG:
             return c
@@ -356,6 +365,7 @@ def _auto_refresh_loop():
             INDEX = data
             BY_SLUG = {e["slug"]: e for e in data.get("pokemon", [])}
             _ROW_CACHE.clear()                 # force fresh battle-data fetches
+            _DEAD_ROWS.clear()                 # re-test 404s against the new index
             # A refreshed index has to go through everything a fresh start does. DEX_NAME
             # is keyed by index slug, so when the index renamed every regional slug at M-C
             # a long-running server would have kept the old table and _enemy_specs would
@@ -417,11 +427,18 @@ def save_team_note(key, text):
                   ensure_ascii=False, indent=0)
 
 _ROW_CACHE = {}
+# Slugs the API has no endpoint for at all. Kept apart from _ROW_CACHE so the "never
+# cache an empty result" rule below still holds for the soft-rate-limit case it was
+# written for: a 404 is a different animal, and re-asking cannot change the answer.
+# Cleared on every index refresh, since a mon absent today may be served next week.
+_DEAD_ROWS = set()
 MAX_WORKERS = 4
 def battle_rows(slug, fmt=FORMAT):
     key = (slug, fmt)
     if key in _ROW_CACHE:
         return _ROW_CACHE[key]
+    if key in _DEAD_ROWS:
+        return []
     for attempt in range(4):
         try:
             req = urllib.request.Request(f"{API}/api/battle/{fmt}/{slug}", headers=UA)
@@ -433,6 +450,15 @@ def battle_rows(slug, fmt=FORMAT):
             # HTTP 200 but zero rows: almost always a soft rate-limit under a
             # concurrent burst, NOT a genuinely dataless mon. Back off and retry.
             print(f"empty rows for {slug} [{fmt}] (try {attempt+1}/4) — retrying")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # Permanent. The index lists entries the battle API never serves
+                # (maushold, floette). Retrying one costs 8s of sleep and used to cost
+                # it again on every single scan, stalling the whole card render.
+                _DEAD_ROWS.add(key)
+                print(f"no battle endpoint for {slug} [{fmt}] — skipping until next refresh")
+                return []
+            print(f"battle fetch failed for {slug} [{fmt}] (try {attempt+1}/4): {e}")
         except Exception as e:
             print(f"battle fetch failed for {slug} [{fmt}] (try {attempt+1}/4): {e}")
         time.sleep(0.8 * (attempt + 1))
@@ -846,7 +872,12 @@ def head_chips(head, cls=""):
         if not status:
             c += " hit"
             hook = f' data-mv="{html.escape(n, quote=True)}" onclick="pickMove(this)"'
-        out += f'<span class="{c}" style="color:{col}"{hook}>{n}{badge}</span>'
+        # same usage bar the grid cells carry: pulling a move up here to flag its
+        # priority should not cost the read of how often it is actually run
+        bar = (f'<span class="pbar"><i style="width:{min(100, p):.0f}%;'
+               f'background:{col}"></i></span>') if p is not None else ""
+        out += (f'<span class="{c}" style="color:{col}"{hook}>'
+                f'<span class="pcn">{n}{badge}</span>{bar}</span>')
     return f'<div class="pwrap {cls}">{out}</div>'
 
 def cent(n, p, g=None, cnt=None, tot=None):
@@ -1098,7 +1129,11 @@ header h1 b{{color:var(--accent)}}
 .tp{{font:700 9.5px/1 var(--f);color:#0b0f16;background:var(--tc);padding:3px 8px;border-radius:5px;text-transform:uppercase;letter-spacing:.05em}}
 .head-right{{margin-left:auto;display:flex;align-items:center;gap:10px}}
 .pwrap{{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:5px;max-width:420px}}
-.pchip{{white-space:nowrap;font:600 11px var(--f);background:var(--inset);border:1px solid var(--line);border-radius:6px;padding:3px 8px}}
+.pchip{{white-space:nowrap;font:600 11px var(--f);background:var(--inset);border:1px solid var(--line);border-radius:6px;padding:3px 8px;display:flex;flex-direction:column;gap:4px;justify-content:center}}
+.pcn{{display:block}}
+.pbar{{position:relative;width:100%;height:3px;background:#0a0d13;border-radius:2px;overflow:hidden}}
+.pbar i{{display:block;height:100%}}
+.pchip.status .pbar{{background:#c9d2de}}
 .pchip.prio{{border-color:var(--warn)}}
 .pchip.status{{background:#eef1f5;border-color:#c9d2de}}
 .pchip em{{font-style:normal;color:var(--warn);font-weight:800;font-size:9.5px;margin-left:4px}}
