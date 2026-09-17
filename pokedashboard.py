@@ -95,23 +95,27 @@ def _base_species(slug):
         if slug == b or slug.startswith(b + "-"):
             return b
     return slug
-REGIONAL = {"Alola": "alolan-", "Galar": "galarian-", "Hisui": "hisuian-"}
-SUFFIX = {"Fan": "-fan", "Frost": "-frost", "Heat": "-heat", "Mow": "-mow", "Wash": "-wash",
-          "Midnight": "-midnight", "Dusk": "-dusk", "Blade": "-blade", "Small": "-small",
-          "Large": "-large", "Jumbo": "-super", "Hero": "-hero"}
-SPECIAL = {"0128-Paldea_Aqua": "paldean-tauros-aqua-breed",
-           "0128-Paldea_Blaze": "paldean-tauros-blaze-breed",
-           "0128-Paldea_Combat": "paldean-tauros-combat-breed",
-           "0877-Hangry": "morpeko-hangry-mode",
-           "0925-Three": "maushold-family-of-three"}
+# The index slugifies its own display name: "Toxtricity-Low-Key" -> toxtricity-low-key,
+# "Tauros-Paldea-Aqua" -> tauros-paldea-aqua, "Farfetch'd" -> farfetch-d. A sprite tag is
+# those same form words with underscores for spaces, so base + "-" + tag is the right slug
+# for nearly every form. championsbattledata.com used PokeAPI-style names instead
+# ("alolan-ninetales", "paldean-tauros-aqua-breed") until the M-C update flipped it to this
+# Showdown-style scheme -- which is what silently turned every regional form into its base.
+FORM_FIX = {"Jumbo": "super",       # the index calls Gourgeist's biggest size Super
+            "Female": "f"}          # Meowstic / Basculegion / Indeedee
+# PokeAPI drops the apostrophe that the index writes as a hyphen.
+BASE_FIX = {"farfetchd": "farfetch-d", "sirfetchd": "sirfetch-d"}
+# A regional form is a different Pokemon, not a skin, so it is NEVER resolved by falling
+# back to the base species -- that is exactly how Alolan Raichu quietly reads as Raichu.
+# If one fails to resolve the card shows no data and startup says so, loudly.
+REGIONAL = {"Alola", "Galar", "Hisui", "Paldea"}
 
-def _candidates(dex, tag, base):
-    if tag and f"{dex}-{tag}" in SPECIAL: return [SPECIAL[f"{dex}-{tag}"]]
-    if tag is None:     return [base, base + "-male", base + "-m", base + "-ordinary"]
-    if tag in REGIONAL: return [REGIONAL[tag] + base]
-    if tag == "Female": return [base + "-f", base + "-female"]
-    if tag in SUFFIX:   return [base + SUFFIX[tag]]
-    return [base]
+def _candidates(tag, base):
+    if tag is None:
+        return [base, base + "-male", base + "-m", base + "-ordinary"]
+    return [f"{base}-{FORM_FIX.get(tag, tag.lower().replace('_', '-'))}"]
+
+_form_miss = []          # regional sprites with no index entry; reported at startup
 
 def label_to_slug(label):
     s = label.replace("_shiny", "").replace("_Mega", "")
@@ -122,12 +126,19 @@ def label_to_slug(label):
     base = dex_to_slug.get(dex)
     if base is None:
         return None
-    for c in _candidates(dex, tag, base):
+    base = BASE_FIX.get(base, base)
+    for c in _candidates(tag, base):
         if c in BY_SLUG:
             return c
+    if tag and tag.split("_")[0] in REGIONAL:
+        if label not in _form_miss:
+            _form_miss.append(label)
+        return None
     if base in BY_SLUG:
         return base
-    return next((k for k in sorted(BY_SLUG) if k.startswith(base)), base)
+    # base species absent from the index (Vivillon, Gourgeist): only formes exist, so the
+    # first one is as good a read as any -- they share a stat line
+    return next((k for k in sorted(BY_SLUG) if k.startswith(base)), None)
 
 # ================================================================ BATTLE DATA
 def _cache_age_days():
@@ -150,6 +161,30 @@ def load_index(force=False):
 INDEX = load_index()
 BY_SLUG = {e["slug"]: e for e in INDEX.get("pokemon", [])}
 print(f"Index: {len(BY_SLUG)} Pokemon. Refs: {len(_labels)}. Format: {FORMAT}")
+
+def _audit_sprites():
+    """Resolve every form sprite once at startup. When the index renamed its slugs at M-C
+    every regional form silently collapsed onto its base species; this is the line that
+    makes the next such change visible instead of silent."""
+    forms = fell = 0
+    for lbl in _labels:
+        if "_shiny" in lbl:
+            continue
+        m = re.search(r"(\d{4})-([A-Za-z0-9_%]+)", lbl)
+        if not m:
+            continue
+        # compare against the same dex number with no form tag: still equal means the
+        # form was not found and we are reading the base species' data
+        if label_to_slug(lbl) == label_to_slug(f"Menu_CP_{m.group(1)}"):
+            fell += 1
+        else:
+            forms += 1
+    print(f"Sprites: {forms} form variants resolved, {fell} read as base species")
+    if _form_miss:
+        print("  !! regional forms missing from the index, cards will show NO data: "
+              + ", ".join(_form_miss))
+
+_audit_sprites()
 
 # ================================================================ DAMAGE SETUP
 # The calculator names species its own way ("Ninetales-Alola" where the index
