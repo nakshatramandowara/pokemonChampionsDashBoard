@@ -42,6 +42,13 @@ ALIASES = {
     "florgesredflower":      "Florges",
     "furfrounaturalform":    "Furfrou",
     "vivillonfancypattern":  "Vivillon",
+    # ...and the same three again under the Showdown-style names the index switched
+    # to at M-C ("Vivillon-Fancy" rather than "Vivillon Fancy Pattern"). Squawkabilly
+    # and Toxtricity are new in M-C; upstream carries only the base entry for each,
+    # and the variants share its typing and stat line, so this loses nothing.
+    "vivillonfancy":         "Vivillon",
+    "squawkabillyyellow":    "Squawkabilly",
+    "toxtricitylowkey":      "Toxtricity",
 }
 
 

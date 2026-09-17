@@ -186,7 +186,8 @@ function buildStoneTable() {
 
     for (const [forme, stone] of Object.entries(lookup)) {
         const formeEntry = calc.pokedex[forme];
-        const looksLikeAStone = /ite( [XY])?$/.test(stone);
+        // M-C added a third designator: Absolite Z, Garchompite Z, Lucarionite Z.
+        const looksLikeAStone = /ite( [XYZ])?$/.test(stone);
         if (!formeEntry || !looksLikeAStone) continue;
 
         const baseSpecies = allNames.find(name => {
