@@ -6,7 +6,7 @@ Build a local cache of tournament teamsheets from the Limitless API,
 then query it by the Pokemon you've seen on the opponent's team.
 
     python vgcfinder.py build                    # fetch + cache (do this once, re-run weekly)
-    python vgcfinder.py build --format M-B       # only one regulation
+    python vgcfinder.py build --format M-C       # only one regulation
     python vgcfinder.py find incineroar whimsicott
     python vgcfinder.py find incin whims --sets  # + most likely items/moves for the rest
 """
@@ -150,17 +150,40 @@ class BuildAborted(RuntimeError):
     """Build stopped early but progress was saved; re-run to resume."""
 
 
+# Limitless has no format ID for Regulation M-C: organisers run it under CUSTOM, and a
+# fair number keep using the M-B ID out of habit ("r/VGC Regulation M-C Kickoff Cup" is
+# tagged M-B). Neither tag is trustworthy on its own, so M-C is defined as "whatever ran
+# under either tag once the regulation went live". Drop this entry once Limitless adds a
+# real M-C ID, and rebuild.
+ALIAS_FORMATS = {
+    "M-C": {"fetch": ("CUSTOM", "M-B"), "since": "2026-09-09"},
+}
+
+
 def build(fmt, limit=400, min_players=16, fresh=False, progress=None):
     def note(msg):
         print(msg, file=sys.stderr)
         if progress:
             progress(msg)
 
-    tours = get("/tournaments", game="VGC", limit=limit, format=fmt)
+    alias = ALIAS_FORMATS.get(fmt)
+    if alias:
+        tours, by_id = [], set()
+        for src in alias["fetch"]:
+            got = get("/tournaments", game="VGC", limit=limit, format=src)
+            fresh_ones = [t for t in got if t["id"] not in by_id]
+            by_id.update(t["id"] for t in fresh_ones)
+            tours += fresh_ones
+            note(f"  {src}: {len(got)} events, {len(fresh_ones)} new")
+        before = len(tours)
+        tours = [t for t in tours if (t.get("date") or "") >= alias["since"]]
+        note(f"{fmt}: kept {len(tours)}/{before} events dated >= {alias['since']}")
+    else:
+        tours = get("/tournaments", game="VGC", limit=limit, format=fmt)
+        stray = {t.get("format") for t in tours} - {fmt}
+        if stray:
+            note(f"warning: mixed formats came back: {stray}")
     tours = [t for t in tours if t.get("players", 0) >= min_players]
-    stray = {t.get("format") for t in tours} - {fmt}
-    if stray:
-        note(f"warning: mixed formats came back: {stray}")
     note(f"{len(tours)} tournaments to pull")
 
     teams, seen = [], set()
@@ -226,7 +249,10 @@ def build(fmt, limit=400, min_players=16, fresh=False, progress=None):
                 "place": p.get("placing"),
                 "record": p.get("record"),
                 "event": t["name"],
-                "format": t.get("format"),
+                # the regulation this cache is for, so `find --format M-C` works; the tag
+                # Limitless actually filed the event under is kept for auditing
+                "format": fmt,
+                "srcformat": t.get("format"),
                 "date": t.get("date"),
                 "players": t.get("players"),
             })

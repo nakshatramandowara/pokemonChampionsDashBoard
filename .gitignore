@@ -1,7 +1,7 @@
 # screenshots from MacroDroid
 Screenshots/
 
-# generated caches — regenerate with `python vgcfinder.py build --format M-B`
+# generated caches — regenerate with `python vgcfinder.py build --format M-C`
 vgcfinder_cache.json
 vgcfinder_cache.json.tmp
 index_cache.json

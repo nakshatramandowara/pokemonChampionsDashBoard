@@ -39,7 +39,7 @@ MOVE_FLOOR  = 4      # always render at least this many move cells
 MOVE_CAP    = 12     # never render more than this many
 MOVE_MIN_P  = 5.0    # conditioned moves below this % are dropped once the floor is met
 FINDER_STALE_DAYS = 7   # past this, the header flags the teamsheet cache age
-TEAM_FORMAT = "M-B"     # regulation to build teamsheets for when no cache exists yet
+TEAM_FORMAT = "M-C"     # regulation to build teamsheets for when no cache exists yet
 REFRESH_DAYS = 2                       # auto-refresh index + battle cache every N days (0 = never)
 API       = "https://championsbattledata.com"
 CACHE     = "index_cache.json"
@@ -237,8 +237,16 @@ FINDER_TEAMS, FINDER_BUILT, FINDER_FMT, FINDER_KEYS = [], None, "?", set()
 _BY_TOKENS = {}          # frozenset(tokens) -> norm key
 _FINDER_MTIME = 0.0
 
+# Limitless names a region as an adjective ("Hisuian Arcanine"); the index names it as a
+# suffix ("arcanine-hisui"). Same word, different form, so the token sets never met and
+# every regional form fell through to the species fallback -- Hisuian Arcanine reading
+# regular Arcanine's sets. Fold both spellings onto one token.
+_REGION_TOK = {"alolan": "alola", "galarian": "galar",
+               "hisuian": "hisui", "paldean": "paldea"}
+
 def _toks(s):
-    return frozenset(t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t)
+    return frozenset(_REGION_TOK.get(t, t)
+                     for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t)
 
 def reload_finder(quiet=False):
     """(Re)read vgcfinder_cache.json. Cheap enough to check on every render, so a
@@ -267,7 +275,7 @@ def reload_finder(quiet=False):
             print(f"Teamsheets: {len(FINDER_TEAMS)} teams [{FINDER_FMT}]"
                   + (f", built {age:.1f}d ago" if age is not None else ""))
         else:
-            print("Teamsheets: none — run `python vgcfinder.py build --format M-B`")
+            print(f"Teamsheets: none — run `python vgcfinder.py build --format {TEAM_FORMAT}`")
 
 def finder_if_changed():
     """Reload only when the cache file has actually been rewritten."""
@@ -285,7 +293,9 @@ def finder_if_changed():
 # So match on token SETS, not strings. Stripping a regional prefix is never done —
 # it only ever fires when the right key is absent, silently landing Alolan Raichu
 # on regular Raichu.
-_NOISE = {"forme", "form", "mode", "breed", "mask"}   # droppable only when unambiguous
+# droppable only when unambiguous. "flower" is for Limitless's "Eternal Flower Floette",
+# which the index calls floette-eternal.
+_NOISE = {"forme", "form", "mode", "breed", "mask", "flower"}
 
 _ALIAS = {"paldeantauroscombatbreed": "paldeantauros"}   # cache writes Combat bare
 _unbridged, _loose = set(), set()
