@@ -58,9 +58,13 @@ Partner prediction · top-finishes / placings display · subset backoff to 5 or 
 
 ## Display config (pokedashboard.py)
 `COND_MIN=1`, `COUNT_MODE=10` ("7/8" at small n), `DIVERGE=20`pp, `MOVE_FLOOR=4`, `MOVE_CAP=12`,
-`MOVE_MIN_P=5.0`, `FINDER_STALE_DAYS=7`. Damaging move cells are washed with their type at 13%
-(`type_skin`, border 40%); status moves take no tint and a dashed border, so colour-vs-none reads
-as hits-vs-doesn't. Types come from `MOVE_TYPE`, dumped from the calculator by `champcalc.js
+`MOVE_MIN_P=5.0`, `FINDER_STALE_DAYS=7`. Move cells are type badges: damaging ones are a solid
+fill in the type colour with rounded-rect corners, status ones the same hue as an outlined pill
+(`border-radius:999px`). **Shape carries hits-vs-doesn't, colour carries type** — they must stay
+independent, because Normal is grey and a grey badge beside a grey pill has to still read.
+`chip()` picks the ink (ported from the page JS so a cell and its damage chip agree); every badge
+clears WCAG AA. `_readable_on` lifts Dark/Dragon/Ghost/Poison for pill text, which are too dark to
+use raw on the card. Usage lives on the bar alone now — the name has to be whatever is legible. Types come from `MOVE_TYPE`, dumped from the calculator by `champcalc.js
 --moves` — the usage site never sends them. No calculator means no tint, which is fine. Spread column is always global (teamsheets have no stat
 points), marked with an orange "g". Local/global are both rendered server-side and swapped by CSS
 class `.gs`; badge toggle persisted in localStorage `gs:<slug>`.

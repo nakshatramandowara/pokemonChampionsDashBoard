@@ -842,18 +842,72 @@ def _rgba(hexcol, a):
     r, g, b = (int(h[i:i+2], 16) for i in (0, 2, 4))
     return f"rgba({r},{g},{b},{a})"
 
-def type_skin(name, border=True):
-    """Inline background/border tinted to a move's type, or '' when unknown.
+# Same idea as chip() in the page JS, ported so a server-rendered move cell and the
+# damage chip for that move land on the identical colour. The palette runs from
+# Electric (#f4cf3c, nearly white) to Dark (#6a6480), so no single ink stays legible
+# across it: pick whichever of near-black or white contrasts better, then nudge the
+# background until the pair clears WCAG AA, which keeps the hue recognisable.
+DARK_INK, LIGHT_INK, _AA = "#0b0f16", "#ffffff", 4.5
+_CHIP = {}
 
-    The usage site never sends a move's type, so this comes from the calculator
-    (MOVE_TYPE). Deliberately a wash rather than a block of colour: the cell still
-    has to read as a cell, and the usage bar inside it stays the loud element.
-    Header chips pass border=False — theirs already carries the priority orange."""
+def _lum(hexcol):
+    out = []
+    for i in (1, 3, 5):
+        c = int(hexcol[i:i+2], 16) / 255
+        out.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2]
+
+def _ratio(a, b):
+    x, y = _lum(a), _lum(b)
+    return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+
+def _mix(hexcol, t, toward):
+    parts = [round(int(hexcol[i:i+2], 16) + (toward - int(hexcol[i:i+2], 16)) * t)
+             for i in (1, 3, 5)]
+    return "#" + "".join(f"{c:02x}" for c in parts)
+
+def chip(bg):
+    """(background, ink) that clear AA together."""
+    if bg in _CHIP:
+        return _CHIP[bg]
+    use_light = _ratio(bg, LIGHT_INK) > _ratio(bg, DARK_INK)
+    fg = LIGHT_INK if use_light else DARK_INK
+    b = bg
+    for _ in range(8):
+        if _ratio(b, fg) >= _AA:
+            break
+        b = _mix(b, 0.07, 0 if use_light else 255)
+    _CHIP[bg] = (b, fg)
+    return _CHIP[bg]
+
+def _readable_on(tc, bgc="#161c27", target=4.5):
+    """Lift a type colour toward white until it is legible as ink on the card."""
+    c = tc
+    for _ in range(12):
+        if _ratio(c, bgc) >= target:
+            break
+        c = _mix(c, 0.12, 255)
+    return c
+
+def type_skin(name, status=False):
+    """(inline style, ink colour) for one move, or ('', '') when the type is unknown.
+
+    Damaging moves are a solid badge in their type colour, the way the type chips in
+    the game are. Status moves take the same hue but only as an outline, and the CSS
+    rounds them into a pill — so the shape says whether it hits and the colour says
+    what it is. Two channels, neither leaning on the other: Normal is grey, and a grey
+    badge next to a grey pill still reads correctly."""
     tc = TYPE_COLORS.get(MOVE_TYPE.get(name, ""), "")
     if not tc:
-        return ""
-    skin = f"background:{_rgba(tc, .13)}"
-    return skin + f";border-color:{_rgba(tc, .40)}" if border else skin
+        return "", ""
+    if status:
+        # an outlined pill draws its type in the type's own colour, and four of them
+        # (Dark, Dragon, Ghost, Poison) are too dark to read as ink on the card --
+        # Taunt, Dragon Dance, Destiny Bond and Toxic are all common. Lift those.
+        lit = _readable_on(tc)
+        return f"background:{_rgba(tc, .15)};border-color:{lit}", lit
+    bg, fg = chip(tc)
+    return f"background:{bg};border-color:{bg}", fg
 
 def _move_cell(n, p, status, tag="", g=None):
     """A move in the enemy's grid. Damaging moves are clickable: they reveal
@@ -865,15 +919,17 @@ def _move_cell(n, p, status, tag="", g=None):
     # tick sits at the global usage, so the gap to the bar edge IS the divergence
     tick = f'<u style="left:{min(100, g):.0f}%"></u>' if g is not None else ""
     hook = "" if status else f' data-mv="{html.escape(n, quote=True)}" onclick="pickMove(this)"'
-    # damaging moves are washed with their type; status moves stay untinted, so
-    # "has colour" reads as "this one hits" without a second look
-    skin = "" if status else type_skin(n)
+    # a filled badge if it hits, an outlined pill if it does not; the type is the
+    # colour either way, so shape and hue never have to carry the same load
+    skin, ink = type_skin(n, status)
     if not status:
         cls += " hit"
     mt = MOVE_TYPE.get(n, "")
     ttl = f' title="{n} &middot; {mt}"' if mt else ""
+    # usage moves to the bar alone: the name now sits on a saturated fill and has to
+    # be whatever stays readable on it
     return (f'<span class="{cls}" style="{skin}"{hook}{ttl}>'
-            f'<span class="mvn" style="color:{col}">{n}{sup}</span>'
+            f'<span class="mvn" style="color:{ink or col}">{n}{sup}</span>'
             f'<span class="mvb"><i style="width:{w}%;background:{col}"></i>{tick}</span></span>')
 
 def neg_row(negs, lab="absent"):
@@ -891,7 +947,7 @@ def head_chips(head, cls=""):
         status = is_status(n)
         col = usage_color(p)
         c = "pchip" + (" status" if status else "") + (" prio" if pr else "") + (" xfmt" if tag else "")
-        skin = "" if status else type_skin(n, border=False)
+        skin, ink = type_skin(n, status)
         badge = (f'<em>+{pr}</em>' if pr else "") + (f'<sup class="fmt">{tag}</sup>' if tag else "")
         # priority moves live up here rather than in the grid, but a damaging
         # one still needs to open the incoming row
@@ -905,7 +961,7 @@ def head_chips(head, cls=""):
                f'background:{col}"></i></span>') if p is not None else ""
         mt = MOVE_TYPE.get(n, "")
         ttl = f' title="{n} &middot; {mt}"' if mt else ""
-        out += (f'<span class="{c}" style="color:{col};{skin}"{hook}{ttl}>'
+        out += (f'<span class="{c}" style="color:{ink or col};{skin}"{hook}{ttl}>'
                 f'<span class="pcn">{n}{badge}</span>{bar}</span>')
     return f'<div class="pwrap {cls}">{out}</div>'
 
@@ -1160,28 +1216,28 @@ header h1 b{{color:var(--accent)}}
 .pwrap{{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:5px;max-width:420px}}
 .pchip{{white-space:nowrap;font:600 11px var(--f);background:var(--inset);border:1px solid var(--line);border-radius:6px;padding:3px 8px;display:flex;flex-direction:column;gap:4px;justify-content:center}}
 .pcn{{display:block}}
-.pbar{{position:relative;width:100%;height:3px;background:#0a0d13;border-radius:2px;overflow:hidden}}
+.pbar{{position:relative;width:100%;height:3px;background:rgba(0,0,0,.42);border-radius:2px;overflow:hidden}}
 .pbar i{{display:block;height:100%}}
-.pchip.status .pbar{{background:#141a25}}
+.pchip.status .pbar{{background:rgba(0,0,0,.30)}}
 .pchip.prio{{border-color:var(--warn)}}
-.pchip.status{{background:var(--inset);border-style:dashed;border-color:#2c3547}}
-.pchip.status .pcn{{opacity:.82}}
+.pchip.status{{border-radius:999px;padding:3px 11px}}
+.pchip.status .pcn{{opacity:1}}
 .pchip em{{font-style:normal;color:var(--warn);font-weight:800;font-size:9.5px;margin-left:4px}}
 .notebtn{{flex:none;background:none;border:1px solid var(--line);color:var(--dim);font:600 11px var(--f);padding:6px 12px;border-radius:8px;cursor:pointer}}
 .notebtn:hover{{color:var(--ink);border-color:var(--dim)}}
 .notebtn.hasnote{{color:var(--accent);border-color:var(--accent)}}
 .moves{{display:grid;grid-template-columns:repeat(6,1fr);gap:7px;margin-bottom:14px}}
 .mv{{display:flex;flex-direction:column;gap:5px;align-items:center;justify-content:center;min-height:42px;padding:6px 4px;background:var(--inset);border:1px solid var(--line);border-radius:8px}}
-.mv.status{{background:var(--inset);border-style:dashed;border-color:#2c3547}}
-.mv.status .mvn{{opacity:.82}}
-.mv.status .mvb{{background:#141a25}}
+.mv.status{{border-radius:999px;padding:6px 10px}}
+.mv.status .mvn{{opacity:1}}
+.mv.status .mvb{{background:rgba(0,0,0,.30)}}
 .mvn{{text-align:center;font:600 11px/1.1 var(--f)}}
 .mv.xfmt{{opacity:.62}}
 .pchip.xfmt{{opacity:.72}}
 .fmt{{font:700 8px var(--mono);color:var(--dim);vertical-align:super;margin-left:1px}}
-.mvb{{position:relative;width:100%;height:3px;background:#0a0d13;border-radius:2px;overflow:hidden}}
+.mvb{{position:relative;width:100%;height:3px;background:rgba(0,0,0,.42);border-radius:2px;overflow:hidden}}
 .mvb i{{display:block;height:100%}}
-.mvb u{{position:absolute;top:-1px;width:1px;height:5px;background:var(--dim);opacity:.85}}
+.mvb u{{position:absolute;top:-1px;width:1px;height:5px;background:#fff;opacity:.75}}
 .mv.status .mvb u{{background:var(--dim)}}
 .ann{{margin-left:5px;font:700 9.5px var(--mono);text-decoration:none;opacity:.85}}
 .ann.up{{color:var(--accent)}}
