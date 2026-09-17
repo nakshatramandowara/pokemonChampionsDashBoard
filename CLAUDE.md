@@ -58,7 +58,10 @@ Partner prediction · top-finishes / placings display · subset backoff to 5 or 
 
 ## Display config (pokedashboard.py)
 `COND_MIN=1`, `COUNT_MODE=10` ("7/8" at small n), `DIVERGE=20`pp, `MOVE_FLOOR=4`, `MOVE_CAP=12`,
-`MOVE_MIN_P=5.0`, `FINDER_STALE_DAYS=7`. Spread column is always global (teamsheets have no stat
+`MOVE_MIN_P=5.0`, `FINDER_STALE_DAYS=7`. Damaging move cells are washed with their type at 13%
+(`type_skin`, border 40%); status moves take no tint and a dashed border, so colour-vs-none reads
+as hits-vs-doesn't. Types come from `MOVE_TYPE`, dumped from the calculator by `champcalc.js
+--moves` — the usage site never sends them. No calculator means no tint, which is fine. Spread column is always global (teamsheets have no stat
 points), marked with an orange "g". Local/global are both rendered server-side and swapped by CSS
 class `.gs`; badge toggle persisted in localStorage `gs:<slug>`.
 

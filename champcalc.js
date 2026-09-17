@@ -74,6 +74,7 @@ const DATA_DIR = process.argv[2] || __dirname;
 const SOURCE_FILES = ['champdata.js', 'champengine.js'];
 const DUMP_STONES = process.argv[3] === '--stones';
 const DUMP_DEX    = process.argv[3] === '--dex';
+const DUMP_MOVES  = process.argv[3] === '--moves';
 
 // Abilities are deliberately not modelled. Most are skipped automatically,
 // because Intimidate and friends live in a wrapper function we never call.
@@ -225,6 +226,17 @@ if (DUMP_DEX) {
     const dex = {};
     for (const [name, entry] of Object.entries(calc.pokedex)) dex[name] = entry.ab || '';
     process.stdout.write(JSON.stringify(dex));
+    process.exit(0);
+}
+
+// move -> [type, category]. The usage site (championsbattledata.com) says which
+// moves a mon runs but never what type they are, so the cards colour them from
+// here. Category also gives an authoritative Status/Physical/Special split.
+if (DUMP_MOVES) {
+    const out = {};
+    for (const [name, m] of Object.entries(calc.moves || {}))
+        out[name] = [m.type || '', m.category || ''];
+    process.stdout.write(JSON.stringify(out));
     process.exit(0);
 }
 

@@ -190,6 +190,19 @@ def dex_names():
     return json.loads(p.stdout)
 
 
+def move_types():
+    """{move: [type, category]} for every move the calculator knows.
+
+    The usage site never says what type a move is, so this is where the cards get
+    it from. Empty dict if Node is unavailable; callers must degrade gracefully."""
+    p = subprocess.run(["node", CALC_JS, DATA_DIR, "--moves"],
+                       capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        print(f"[dmg] could not read move types: {p.stderr[:160]}")
+        return {}
+    return json.loads(p.stdout)
+
+
 def _stones():
     """stone -> mega forme, read out of the calculator's own tables."""
     p = subprocess.run(["node", CALC_JS, DATA_DIR, "--stones"],

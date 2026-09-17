@@ -202,15 +202,17 @@ _audit_sprites()
 # says "Alolan Ninetales"), so every index entry is bridged once at startup.
 DEX_NAME = {}          # index slug        -> Champions dex name
 DEX_MEGAS = {}         # Champions dex name -> [(stone, info)], X before Y
+MOVE_TYPE = {}         # move name          -> type, for colouring the move grid
 
 def _init_damage():
     """Safe to call again when the index is refreshed. Both tables are built in locals and
     rebound at the end, so a request thread never reads a half-filled dict -- and DEX_MEGAS
     cannot accumulate, which a plain re-run would do since it appends per stone."""
-    global DEX_NAME, DEX_MEGAS
+    global DEX_NAME, DEX_MEGAS, MOVE_TYPE
     try:
         dex = damage.dex_names()
         stones = damage._stones()
+        MOVE_TYPE = {m: t for m, (t, _cat) in damage.move_types().items() if t}
     except Exception as e:
         print(f"[dmg] calculator unavailable, damage rows off: {e}")
         return False
@@ -829,25 +831,49 @@ TYPE_COLORS = {"Normal":"#9fa4b0","Fire":"#ff8a4c","Water":"#4d9be6","Electric":
     "Flying":"#93a8e6","Psychic":"#fb7189","Bug":"#a2c520","Rock":"#c9b878","Ghost":"#7d5ba3",
     "Dragon":"#5b6ee1","Dark":"#6a6480","Steel":"#6fa3b8","Fairy":"#f18fd8"}
 
-def usage_color(p, dark=False):
+def usage_color(p):
     if p is None:
         return "var(--dim)"
     p = max(0.0, min(100.0, p))
-    return f"hsl({p * 1.2:.0f} {'72% 40%' if dark else '80% 63%'})"
+    return f"hsl({p * 1.2:.0f} 80% 63%)"
+
+def _rgba(hexcol, a):
+    h = hexcol.lstrip("#")
+    r, g, b = (int(h[i:i+2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{a})"
+
+def type_skin(name, border=True):
+    """Inline background/border tinted to a move's type, or '' when unknown.
+
+    The usage site never sends a move's type, so this comes from the calculator
+    (MOVE_TYPE). Deliberately a wash rather than a block of colour: the cell still
+    has to read as a cell, and the usage bar inside it stays the loud element.
+    Header chips pass border=False — theirs already carries the priority orange."""
+    tc = TYPE_COLORS.get(MOVE_TYPE.get(name, ""), "")
+    if not tc:
+        return ""
+    skin = f"background:{_rgba(tc, .13)}"
+    return skin + f";border-color:{_rgba(tc, .40)}" if border else skin
 
 def _move_cell(n, p, status, tag="", g=None):
     """A move in the enemy's grid. Damaging moves are clickable: they reveal
     what that move does to my six, in raw HP."""
-    col = usage_color(p, dark=status)
+    col = usage_color(p)
     w = min(100, p) if p is not None else 0
     cls = "mv" + (" status" if status else "") + (" xfmt" if tag else "")
     sup = f'<sup class="fmt">{tag}</sup>' if tag else ""
     # tick sits at the global usage, so the gap to the bar edge IS the divergence
     tick = f'<u style="left:{min(100, g):.0f}%"></u>' if g is not None else ""
     hook = "" if status else f' data-mv="{html.escape(n, quote=True)}" onclick="pickMove(this)"'
+    # damaging moves are washed with their type; status moves stay untinted, so
+    # "has colour" reads as "this one hits" without a second look
+    skin = "" if status else type_skin(n)
     if not status:
         cls += " hit"
-    return (f'<span class="{cls}"{hook}><span class="mvn" style="color:{col}">{n}{sup}</span>'
+    mt = MOVE_TYPE.get(n, "")
+    ttl = f' title="{n} &middot; {mt}"' if mt else ""
+    return (f'<span class="{cls}" style="{skin}"{hook}{ttl}>'
+            f'<span class="mvn" style="color:{col}">{n}{sup}</span>'
             f'<span class="mvb"><i style="width:{w}%;background:{col}"></i>{tick}</span></span>')
 
 def neg_row(negs, lab="absent"):
@@ -863,8 +889,9 @@ def head_chips(head, cls=""):
     out = ""
     for n, p, tag, pr in head:
         status = is_status(n)
-        col = usage_color(p, dark=status)
+        col = usage_color(p)
         c = "pchip" + (" status" if status else "") + (" prio" if pr else "") + (" xfmt" if tag else "")
+        skin = "" if status else type_skin(n, border=False)
         badge = (f'<em>+{pr}</em>' if pr else "") + (f'<sup class="fmt">{tag}</sup>' if tag else "")
         # priority moves live up here rather than in the grid, but a damaging
         # one still needs to open the incoming row
@@ -876,7 +903,9 @@ def head_chips(head, cls=""):
         # priority should not cost the read of how often it is actually run
         bar = (f'<span class="pbar"><i style="width:{min(100, p):.0f}%;'
                f'background:{col}"></i></span>') if p is not None else ""
-        out += (f'<span class="{c}" style="color:{col}"{hook}>'
+        mt = MOVE_TYPE.get(n, "")
+        ttl = f' title="{n} &middot; {mt}"' if mt else ""
+        out += (f'<span class="{c}" style="color:{col};{skin}"{hook}{ttl}>'
                 f'<span class="pcn">{n}{badge}</span>{bar}</span>')
     return f'<div class="pwrap {cls}">{out}</div>'
 
@@ -1133,17 +1162,19 @@ header h1 b{{color:var(--accent)}}
 .pcn{{display:block}}
 .pbar{{position:relative;width:100%;height:3px;background:#0a0d13;border-radius:2px;overflow:hidden}}
 .pbar i{{display:block;height:100%}}
-.pchip.status .pbar{{background:#c9d2de}}
+.pchip.status .pbar{{background:#141a25}}
 .pchip.prio{{border-color:var(--warn)}}
-.pchip.status{{background:#eef1f5;border-color:#c9d2de}}
+.pchip.status{{background:var(--inset);border-style:dashed;border-color:#2c3547}}
+.pchip.status .pcn{{opacity:.82}}
 .pchip em{{font-style:normal;color:var(--warn);font-weight:800;font-size:9.5px;margin-left:4px}}
 .notebtn{{flex:none;background:none;border:1px solid var(--line);color:var(--dim);font:600 11px var(--f);padding:6px 12px;border-radius:8px;cursor:pointer}}
 .notebtn:hover{{color:var(--ink);border-color:var(--dim)}}
 .notebtn.hasnote{{color:var(--accent);border-color:var(--accent)}}
 .moves{{display:grid;grid-template-columns:repeat(6,1fr);gap:7px;margin-bottom:14px}}
 .mv{{display:flex;flex-direction:column;gap:5px;align-items:center;justify-content:center;min-height:42px;padding:6px 4px;background:var(--inset);border:1px solid var(--line);border-radius:8px}}
-.mv.status{{background:#eef1f5;border-color:#c9d2de}}
-.mv.status .mvb{{background:#c9d2de}}
+.mv.status{{background:var(--inset);border-style:dashed;border-color:#2c3547}}
+.mv.status .mvn{{opacity:.82}}
+.mv.status .mvb{{background:#141a25}}
 .mvn{{text-align:center;font:600 11px/1.1 var(--f)}}
 .mv.xfmt{{opacity:.62}}
 .pchip.xfmt{{opacity:.72}}
@@ -1151,7 +1182,7 @@ header h1 b{{color:var(--accent)}}
 .mvb{{position:relative;width:100%;height:3px;background:#0a0d13;border-radius:2px;overflow:hidden}}
 .mvb i{{display:block;height:100%}}
 .mvb u{{position:absolute;top:-1px;width:1px;height:5px;background:var(--dim);opacity:.85}}
-.mv.status .mvb u{{background:#7b879b}}
+.mv.status .mvb u{{background:var(--dim)}}
 .ann{{margin-left:5px;font:700 9.5px var(--mono);text-decoration:none;opacity:.85}}
 .ann.up{{color:var(--accent)}}
 .ann.dn{{color:var(--warn)}}
