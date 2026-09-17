@@ -28,10 +28,25 @@ UA = {"User-Agent": "vgcfinder/1.0 (personal use)"}
 
 # ---------- normalising names ----------
 
+# Limitless marks the female forme with a sign ("Indeedee ♀"); the index spells it as a
+# suffix ("indeedee-f"). norm() strips everything outside a-z0-9, so the sign used to
+# vanish and "Indeedee" and "Indeedee ♀" collapsed to one key -- two Pokemon with
+# different stats and different jobs, indistinguishable in the cache. Indeedee ♀ is the
+# most-used female forme in M-C by a wide margin, so that is not a rounding error.
+GENDER = {"♀": " f", "♂": " m"}
+
+
+def degender(name):
+    """'Indeedee ♀' -> 'Indeedee f', so the sign survives normalising."""
+    for sign, word in GENDER.items():
+        name = (name or "").replace(sign, word)
+    return name
+
+
 def norm(name):
     """'Incineroar' / 'incin-eroar' / 'Arcanine [Hisuian Form]' -> comparable key."""
     name = re.sub(r"\[.*?\]", "", name or "")
-    return re.sub(r"[^a-z0-9]", "", name.lower())
+    return re.sub(r"[^a-z0-9]", "", degender(name).lower())
 
 
 def resolve(query, known):

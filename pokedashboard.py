@@ -246,7 +246,7 @@ _REGION_TOK = {"alolan": "alola", "galarian": "galar",
 
 def _toks(s):
     return frozenset(_REGION_TOK.get(t, t)
-                     for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t)
+                     for t in re.split(r"[^a-z0-9]+", vf.degender(s).lower()) if t)
 
 def reload_finder(quiet=False):
     """(Re)read vgcfinder_cache.json. Cheap enough to check on every render, so a

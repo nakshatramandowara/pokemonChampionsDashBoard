@@ -25,11 +25,13 @@ Pokémon and shows moves / items / abilities / spreads / damage calcs per card.
 - **JS stubs in the Node bridge must stay falsy/minimal.** A truthy jQuery stub once applied phantom Ruin abilities (−25% damage) silently.
 - Sprite recognition: SIZE=64, raw Euclidean distance, composite onto red `(133,2,52)` background. Don't "improve" to 128 or cosine.
 - CSS: `[hidden]{display:none}` must be explicit (`.revrow{display:flex}` overrides it).
-- Known and accepted, all logged `[bridge] LOOSE`, never silent: the gender formes
-  (`indeedee-f`, `basculegion-f`, `meowstic-f`) collapse onto the base key because `vf.norm` strips ♀/♂;
-  so do gourgeist sizes, `maushold-four`, `lycanroc-midnight`, `squawkabilly-yellow`, `vivillon-fancy`.
-  Fixing the gender ones means changing `norm()` and rebuilding the cache. Calyrex/Ogerpon are no longer
-  in the index.
+- **`norm()` keeps the gender sign.** Limitless writes `Indeedee ♀`, the index writes `indeedee-f`;
+  both normalise to `indeedeef`. `vf.degender` runs inside `norm()` and `_toks`, so changing either
+  invalidates every cached key — rebuild with `--fresh` after touching them.
+- Known and accepted, all logged `[bridge] LOOSE`, never silent: gourgeist sizes, `maushold-four`,
+  `lycanroc-midnight`, `squawkabilly-yellow`, `vivillon-fancy` collapse onto the base key. These are
+  unfixable here — Limitless writes those mons bare, so the source data does not distinguish them.
+  Calyrex/Ogerpon are no longer in the index.
 
 ## Working style
 - Run a targeted diagnostic before changing code. No speculative refactors.
@@ -62,6 +64,9 @@ Done, in this order. Each step has a commit; `31d4e17` is the pre-migration chec
    Rebuild with `python vgcfinder.py build --format M-C --fresh`.
    Drop the alias once Limitless adds a real M-C ID.
 4. **Bridging.** Teamsheet slots reachable from a dashboard slug: 29320/29322.
+5. **Gender formes.** `norm()` was dropping ♀, so `Indeedee` and `Indeedee ♀` shared one key — 955
+   teams reading the wrong stat line (♀ is +10 HP/+10 SpD, −10 SpA/−10 Spe). Now split; Meowstic-F and
+   Basculegion-F came along with it, which retires that entry from the known-LOOSE list.
 
 `resolve_champdata.js` uses a *faithful* `$.extend` — that is correct and does not contradict the
 falsy-stub rule, which is about `champcalc.js` at runtime. The two stubs exist for opposite reasons.
