@@ -18,8 +18,8 @@ PORT      = 5000
 ip = socket.gethostbyname(socket.gethostname())
 print(f"Upload  ->  http://{ip}:{PORT}/upload")
 # ================================================================ CONFIG
-REF_DIR   = r"C:/Users/admin/Desktop/pokeicons"
-SHOTS_DIR = os.path.expanduser("~/Desktop/pokemonChampionsDashB/Screenshots")
+REF_DIR   = r"C:\Users\naksh\OneDrive\Desktop\thinkpad backup\pokeicons"
+SHOTS_DIR = r"C:\Users\naksh\OneDrive\Desktop\thinkpad backup\pokemonChampionsDashB\Screenshots"
 SIZE      = 64
 RED       = (133, 2, 52)
 BOX       = lambda d: (1866, 155 + 126 * d, 1978, 267 + 126 * d)
@@ -614,7 +614,7 @@ def condition(d, a):
 # Every spread, every enemy forme and both of my mega states in one pass
 # (~700ms worst case), started in the background so cards render immediately.
 # The page then holds the whole grid and every toggle is a local lookup.
-_DMG = {"key": None, "ready": False, "grids": [], "rev": [], "hp": {}}
+_DMG = {"key": None, "ready": False, "grids": [], "rev": [], "hp": {}, "mymega": []}
 _dmg_lock = threading.Lock()
 
 def _enemy_specs(cards):
@@ -681,6 +681,7 @@ def _damage_worker(key, cards):
             _DMG["grids"] = grids
             _DMG["rev"] = rev
             _DMG["hp"] = damage.team_hp()
+            _DMG["mymega"] = damage.team_megas()
             _DMG["ready"] = True
             moves = sum(len(v) for g in rev for v in g.values())
             print(f"[dmg] ready for {key} ({moves} move readings)")
@@ -691,7 +692,7 @@ def start_damage(key, cards):
     with _dmg_lock:
         if _DMG["key"] == key:
             return                       # already done or in flight for this shot
-        _DMG.update(key=key, ready=False, grids=[], rev=[], hp={})
+        _DMG.update(key=key, ready=False, grids=[], rev=[], hp={}, mymega=[])
     threading.Thread(target=_damage_worker, args=(key, cards), daemon=True).start()
 
 # ================================================================ SCAN
@@ -897,7 +898,7 @@ def _variant(d, cls):
               spread_col(slab, d["spread"]))
     moves = "".join(_move_cell(n, p, is_status(n), tag, g)
                     for n, p, tag, g in d["moves"][:MOVE_CAP]) or '<span class="nd">no move data</span>'
-    return (f'<div class="{cls}"><div class="moves">{moves}</div>'
+    return (f'<div class="vbox {cls}"><div class="moves">{moves}</div>'
             f'<div class="revrow" hidden></div>'
             f'{neg_row(d.get("moves_neg", []), "not run")}'
             f'<div class="detail">{detail}</div></div>')
@@ -1114,7 +1115,8 @@ span.cbadge.vglobal{{display:none}}
 .dmgrow{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 16px}}
 .dmgwait{{color:var(--dim);font:11px var(--mono)}}
 .dmgcell{{display:flex;align-items:center;gap:7px;min-width:0}}
-.dmgname{{font:600 11px var(--f);color:var(--dim);white-space:nowrap;flex:0 0 auto}}
+.dmgname{{font:600 11px var(--f);color:var(--dim);white-space:nowrap;
+  flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;max-width:96px}}
 .dmgmvs{{display:flex;align-items:center;gap:4px;margin-left:auto}}
 .dmgmv{{font:700 10.5px/1 var(--mono);border-radius:5px;padding:3px 6px;
   min-width:30px;text-align:center;cursor:help}}
@@ -1152,7 +1154,9 @@ span.cbadge.vglobal{{display:none}}
   margin-top:-5px;margin-right:-4px;border-radius:5px}}
 .revx:hover{{color:var(--ink);background:rgba(255,255,255,.07)}}
 .revc{{display:flex;align-items:baseline;gap:5px;font:11.5px var(--mono)}}
-.revc span{{color:var(--dim);font:600 11px var(--f)}}
+.revc span{{color:var(--dim);font:600 11px var(--f);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;max-width:96px}}
+.revc .dmgms{{max-width:none;font-size:11px;width:22px;height:22px;margin:-6px -3px -6px -6px}}
 .revc b{{font-weight:700}}
 .revc u{{text-decoration:none;color:var(--dim);font-size:9.5px}}
 .spr-pick{{cursor:pointer;border-radius:5px;padding:1px 4px;margin:0 -4px 5px}}
@@ -1272,9 +1276,18 @@ function toggleStone(el){{const card=el.closest('.card');const v=el.dataset.v;
    DMG[cardIndex][spreadIndex + ':' + enemyForme][myMegaScope] -> six cells.
    The server computes every combination once, so nothing here refetches.
    myMegaOff holds the names I have chosen NOT to mega. */
-let DMG=null,REV=null,MYHP=null,dmgLoaded=false,myMegaOff=new Set();
+let DMG=null,REV=null,MYHP=null,MYMEGA=null,dmgLoaded=false,myMegaOff=new Set();
 try{{myMegaOff=new Set(JSON.parse(localStorage.getItem('nomega')||'[]'));}}catch(e){{}}
 function dcolor(p){{p=Math.max(0,Math.min(150,p));return 'hsl('+(p*0.8).toFixed(0)+' 80% 63%)';}}
+// Display name for the damage rows. Regional and paldean forms drop the suffix
+// (Arcanine-Hisui -> Arcanine), megas keep just the designator
+// (Mega Charizard X -> M-Charizard X). CSS truncates anything still too long and
+// the full name stays on the title attribute.
+function shortName(name){{
+  const s=String(name);
+  const mega=s.match(/^Mega (.+)$/);
+  if(mega)return 'M-'+mega[1];
+  return s.split('-')[0];}}
 // The type palette spans Electric (#f4cf3c, very light) to Dark (#6a6480), so no
 // single ink colour stays legible on all of them. Pick whichever of near-black or
 // white has the better WCAG contrast ratio against each chip.
@@ -1319,13 +1332,14 @@ function paintDamage(card){{
     const canMega=on[i].mega,useMega=canMega&&!myMegaOff.has(on[i].name);
     const cell=(useMega?on:off)[i]||on[i];
     const stone=canMega?'<span class="dmgms'+(useMega?' on':'')
-      +'" data-mi="'+i+'" title="toggle Mega">&#9670;</span>':'';
+      +'" data-mon="'+cell.name+'" title="toggle Mega">&#9670;</span>':'';
     const mvs=(cell.moves||[]).map(function(m){{
       const st=chip(TCOL[m[2]]||'#888888');
       return '<span class="dmgmv" style="background:'+st.bg+';color:'+st.fg+'" title="'
         +m[0]+' &middot; '+m[2]+' &middot; '+m[1]+'%">'+m[1]+'</span>';
     }}).join('');
-    html+='<div class="dmgcell">'+stone+'<span class="dmgname">'+cell.name+'</span>'+
+    html+='<div class="dmgcell">'+stone+'<span class="dmgname" title="'+cell.name+'">'
+          +shortName(cell.name)+'</span>'+
           '<span class="dmgmvs">'+
           (mvs||'<span class="dmgmv" style="color:var(--dim)">&mdash;</span>')+'</span></div>';
   }}
@@ -1337,14 +1351,14 @@ function hpcolor(dmg,max){{const f=Math.max(0,Math.min(1,dmg/(max||1)));
 // Which variant block is on screen. Priority chips sit in the card header,
 // outside both blocks, so a chip click has to be routed to the visible one.
 function activeBlock(card){{
-  return card.querySelector('.vonly')
-      || card.querySelector(card.classList.contains('gs')?'.vglobal':'.vlocal');}}
+  return card.querySelector('.vbox.vonly')
+      || card.querySelector(card.classList.contains('gs')?'.vbox.vglobal':'.vbox.vlocal');}}
 function pickMove(el){{
   const card=el.closest('.card');
-  // careful: the priority chips live in a wrapper that also carries the
-  // vlocal/vglobal class, and that wrapper has no row of its own
-  let block=el.closest('.vlocal,.vglobal,.vonly');
-  if(!block||!block.querySelector('.revrow'))block=activeBlock(card)||card;
+  // chips live outside any .vbox, so closest() returns null for them and the
+  // row is routed to whichever variant is currently on screen
+  let block=el.closest('.vbox');
+  if(!block)block=activeBlock(card)||card;
   const row=block.querySelector('.revrow');if(!row)return;
   const move=el.dataset.mv;
   const already=el.classList.contains('sel');
@@ -1369,7 +1383,10 @@ function pickMove(el){{
     const useMega=!myMegaOff.has(on[i][0]);
     const cell=(useMega?on:off)[i]||on[i];
     const max=(MYHP&&MYHP[cell[0]])||0;
-    html+='<span class="revc"><span>'+cell[0]+'</span>'
+    const canMega=MYMEGA&&MYMEGA.indexOf(cell[0])>=0;
+    const stone=canMega?'<span class="dmgms'+(useMega?' on':'')+'" data-mon="'+cell[0]
+      +'" title="toggle Mega">&#9670;</span>':'';
+    html+='<span class="revc">'+stone+'<span title="'+cell[0]+'">'+shortName(cell[0])+'</span>'
       +'<b style="color:'+hpcolor(cell[1],max)+'">'+cell[1]+'</b>'
       +(max?'<u>/'+max+'</u>':'')+'</span>';
   }}
@@ -1395,10 +1412,10 @@ function toggleMyMega(name){{
 document.addEventListener('click',function(ev){{
   const el=ev.target.closest?ev.target.closest('.dmgms'):null;if(!el)return;
   ev.stopPropagation();
-  const card=el.closest('.card');if(!card||!DMG)return;
-  const grid=DMG[card.dataset.ei];if(!grid)return;
-  const g=grid[spreadIndex(card)+':'+enemyForme(card)];if(!g||!g.on)return;
-  const cell=g.on[parseInt(el.dataset.mi,10)];if(cell)toggleMyMega(cell.name);}});
+  // works in both the outgoing row and the incoming row. Names carry no double
+  // quotes, so the attribute is safe -- unlike the old inline onclick, which
+  // nested a JS string literal inside an HTML attribute.
+  if(el.dataset.mon)toggleMyMega(el.dataset.mon);}});
 function pickSpread(el){{const card=el.closest('.card'),si=el.dataset.si;
   // both the local and global blocks carry spread cells; keep them in step
   card.querySelectorAll('.spr-pick').forEach(function(s){{
@@ -1410,7 +1427,8 @@ function toggleDmg(b){{const w=b.closest('.card').querySelector('.dmgwrap');if(!
   else{{w.setAttribute('hidden','');b.classList.remove('hasnote');}}}}
 async function loadDamage(){{if(dmgLoaded)return;
   try{{const j=await(await fetch('/damage?t='+Date.now(),{{cache:'no-store'}})).json();
-    if(!j.ready)return;DMG=j.grids;REV=j.rev||[];MYHP=j.hp||{{}};dmgLoaded=true;
+    if(!j.ready)return;DMG=j.grids;REV=j.rev||[];MYHP=j.hp||{{}};MYMEGA=j.mymega||[];
+    dmgLoaded=true;
     paintAllDamage();
     // a move clicked while the background pass was still running left its row
     // reading "calculating..."; redraw those now that the data is here
@@ -1460,7 +1478,7 @@ def version():
 def damage_grid():
     with _dmg_lock:
         r = jsonify(ready=_DMG["ready"], key=_DMG["key"], grids=_DMG["grids"],
-                    rev=_DMG["rev"], hp=_DMG["hp"])
+                    rev=_DMG["rev"], hp=_DMG["hp"], mymega=_DMG["mymega"])
     r.headers["Cache-Control"] = "no-store"
     return r
 

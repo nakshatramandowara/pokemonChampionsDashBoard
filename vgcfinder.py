@@ -136,12 +136,14 @@ def formats():
     vgc = next((g for g in games if g.get("id") == "VGC" or g.get("name") == "VGC"), None)
     if not vgc:
         sys.exit("Couldn't find VGC in /games response: " + json.dumps(games)[:400])
-    for f in vgc.get("formats", []):
-        print(f"  {f.get('id'):<10} {f.get('name','')}")
-    print("\nAlso check what's actually in recent tournaments:")
-    seen = Counter(t.get("format") for t in get("/tournaments", game="VGC", limit=60))
-    for f, n in seen.most_common():
-        print(f"  {f:<10} {n} recent tournaments")
+    fmts = vgc.get("formats", [])
+    if isinstance(fmts, dict):                      # {id: name} or {id: {...}}
+        fmts = [{"id": k, "name": v if isinstance(v, str) else (v or {}).get("name", "")}
+                for k, v in fmts.items()]
+    for f in fmts:
+        if isinstance(f, str):
+            f = {"id": f}
+        print(f"  {f.get('id') or '':<10} {f.get('name', '')}")
 
 
 class BuildAborted(RuntimeError):

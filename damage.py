@@ -216,6 +216,12 @@ def team_hp():
     return {m["name"]: m["stats"]["hp"] for m in _TEAM}
 
 
+def team_megas():
+    """Names of my Pokemon that hold a Mega Stone, so the page knows which
+    entries get a toggle in either damage row."""
+    return [m["name"] for m in _TEAM if "mega" in m]
+
+
 def compute_incoming(enemies):
     """What each enemy move does to MY six, in raw HP.
 
