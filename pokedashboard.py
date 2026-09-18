@@ -204,6 +204,23 @@ DEX_NAME = {}          # index slug        -> Champions dex name
 DEX_MEGAS = {}         # Champions dex name -> [(stone, info)], X before Y
 MOVE_TYPE = {}         # move name          -> type, for colouring the move grid
 
+# Plain mega first, then the designators. Both mega lists -- the card's, built from the
+# index's forms, and the damage grid's, from DEX_MEGAS -- sort by this, and the JS indexes
+# one list by the other's position, so the two orderings must not disagree. Defined up
+# here, not beside the card code, because _init_damage() runs at import and sorts by it.
+_MEGA_ORDER = {"M": 0, "X": 1, "Y": 2, "Z": 3}
+
+def _xy(s):
+    """Return 'X'/'Y'/'Z' if the string carries a mega designator token, else None.
+    Works for stones ('Charizardite X', 'Absolite Z'), form_kind ('Mega Z'), and slugs.
+    M-C added Z; until it was handled here, Absolite Z produced None and fell through
+    to the plain Mega Absol."""
+    toks = re.split(r"[^a-z0-9]+", (s or "").lower())
+    for d in ("x", "y", "z"):
+        if d in toks:
+            return d.upper()
+    return None
+
 def _init_damage():
     """Safe to call again when the index is refreshed. Both tables are built in locals and
     rebound at the end, so a request thread never reads a half-filled dict -- and DEX_MEGAS
@@ -232,8 +249,8 @@ def _init_damage():
 
     for stone, info in stones.items():
         megas.setdefault(info["base"], []).append((stone, info))
-    for base in megas:                           # X before Y, matching _megas_of
-        megas[base].sort(key=lambda si: ("X" not in si[0], "Y" not in si[0]))
+    for base in megas:                        # same order as _megas_of, see _MEGA_ORDER
+        megas[base].sort(key=lambda si: _MEGA_ORDER.get(_xy(si[0]) or "M", 9))
 
     # one rebind each; keep the old tables until both are complete
     DEX_NAME, DEX_MEGAS = names, megas
@@ -515,14 +532,6 @@ def _topp(rows, min_n=1, fmt=lambda r: r.get("name", "")):
 
 SPEED_NAT = {"Timid", "Hasty", "Jolly", "Naive"}
 
-def _xy(s):
-    """Return 'X'/'Y' if the string carries a mega X/Y designator token, else None.
-    Works for stones ('Charizardite X'), form_kind ('Mega X'), and slugs."""
-    toks = re.split(r"[^a-z0-9]+", (s or "").lower())
-    if "x" in toks: return "X"
-    if "y" in toks: return "Y"
-    return None
-
 def _mega_tag(f):
     # form_kind is 'Mega', 'Mega X', or 'Mega Y'; slug/form_name back it up
     return _xy(f.get("form_kind")) or _xy(f.get("slug")) or _xy(f.get("form_name")) or "M"
@@ -532,7 +541,7 @@ def _megas_of(e):
     # form_kind starts with 'mega' ('Mega', 'Mega X', 'Mega Y') -- NOT an exact match
     ms = [f for f in forms if (f.get("form_kind") or "").lower().startswith("mega")]
     # sort X before Y so the array index is deterministic even if a tag fails
-    return sorted(ms, key=lambda f: {"X": 0, "Y": 1}.get(_mega_tag(f), 2))
+    return sorted(ms, key=lambda f: _MEGA_ORDER.get(_mega_tag(f), 9))
 
 SPREAD_KEYS = [("hp", "hp_points"), ("at", "attack_points"), ("df", "defense_points"),
                ("sa", "sp_atk_points"), ("sd", "sp_def_points"), ("sp", "speed_points")]
@@ -991,8 +1000,8 @@ def spread_col(lab, ents):
     return f'<div class="ccol"><span class="clab">{lab}</span>{rows}</div>'
 
 def _is_stone(name):
-    """True if the item name is a Mega Stone (X/Y designator stripped first)."""
-    core = re.sub(r"\b[xy]\b", "", (name or "").lower())
+    """True if the item name is a Mega Stone (X/Y/Z designator stripped first)."""
+    core = re.sub(r"\b[xyz]\b", "", (name or "").lower())
     core = re.sub(r"[^a-z]", "", core)
     return core.endswith("ite")
 
@@ -1008,7 +1017,7 @@ def _stone_v(megas, item):
     i = next((i for i, mg in enumerate(megas) if mg.get("tag") == want), None)
     if i is not None:
         return i
-    return {"X": 0, "Y": 1}.get(want) if len(megas) >= 2 else 0
+    return _MEGA_ORDER.get(want) if len(megas) >= 2 else 0
 
 def item_col(d):
     megas = d.get("megas") or []

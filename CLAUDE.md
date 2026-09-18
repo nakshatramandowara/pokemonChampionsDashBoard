@@ -79,6 +79,10 @@ Done, in this order. Each step has a commit; `31d4e17` is the pre-migration chec
 2. **champdata.js** (`0b3cfe1`). Regenerated from upstream `1369b359` ("Reg M-C sets") via the new
    `resolve_champdata.js`. POKEDEX 315→346, stones 75→81, index→calc bridging 236→264 of 264.
    The stone regex was `/ite( [XY])?$/` and silently dropped the three Z stones; now `[XYZ]`.
+   **The same X/Y-only assumption lived in three places** — `champcalc.js`, `vgcfinder.is_stone`, and
+   `pokedashboard._is_stone`/`_xy` — and the last one was only caught on 2026-09-18, after Absolite Z
+   had been unclickable. Z formes are not cosmetic (Mega Garchomp Z: Spe 171 vs 112, special not
+   physical). `_MEGA_ORDER` fixes one ordering for both mega lists; they are indexed by position.
 3. **Teamsheets** (`488f0ce`). `ALIAS_FORMATS` defines M-C as CUSTOM+M-B dated ≥ 2026-09-09.
    4887 teams / 73 events; 0.4% known contamination from one M-B event. `TEAM_FORMAT = "M-C"`.
    Rebuild with `python vgcfinder.py build --format M-C --fresh`.
