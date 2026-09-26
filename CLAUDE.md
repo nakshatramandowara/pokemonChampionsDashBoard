@@ -9,6 +9,7 @@ Pokémon and shows moves / items / abilities / spreads / damage calcs per card.
 - `vgcfinder.py` — builds `vgcfinder_cache.json` from Limitless teamsheets (`play.limitlesstcg.com/api`); also a CLI.
 - `damage.py` + `bridge.py` → Node subprocess running `champcalc.js` (`champengine.js` unmodified, `champdata.js` = resolved Champions tables from nerd-of-now/NCP-VGC-Damage-Calculator).
 - `resolve_champdata.js` — regenerates `champdata.js` from an upstream `script_res` folder. Generated file; never hand-edit it.
+- `manualteams.txt` — hand-entered ladder teams as Showdown pastes (`=== Name ===` per team). Merged into `FINDER_TEAMS` by `_merge_manual()`; each species goes through `slug_to_key` so it lands on the scan's key. Counts like a teamsheet, flagged "(n manual)" on the badge/header. Hot-reloads on mtime; never touched by `build()`.
 - Data: `index_cache.json` (championsbattledata.com usage), `dex_to_slug.json`, `myteam.json`, `notes.json`, `teamnotes.json`, sprites in `REF_DIR`.
 - Run: `python pokedashboard.py` (`--refresh` forces index re-download).
 

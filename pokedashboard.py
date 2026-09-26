@@ -271,8 +271,17 @@ DAMAGE_ON = _init_damage()
 import vgcfinder as vf
 
 FINDER_TEAMS, FINDER_BUILT, FINDER_FMT, FINDER_KEYS = [], None, "?", set()
+FINDER_MANUAL = 0        # how many of FINDER_TEAMS came from manualteams.txt
 _BY_TOKENS = {}          # frozenset(tokens) -> norm key
-_FINDER_MTIME = 0.0
+_FINDER_MTIME = (0.0, 0.0)   # (teamsheet cache, manual file)
+
+def _finder_mtimes():
+    def mt(p):
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0.0
+    return (mt(vf.CACHE), mt(vf.MANUAL))
 
 # Limitless names a region as an adjective ("Hisuian Arcanine"); the index names it as a
 # suffix ("arcanine-hisui"). Same word, different form, so the token sets never met and
@@ -289,6 +298,7 @@ def reload_finder(quiet=False):
     """(Re)read vgcfinder_cache.json. Cheap enough to check on every render, so a
     CLI rebuild is picked up by the running server without a restart."""
     global FINDER_TEAMS, FINDER_BUILT, FINDER_FMT, FINDER_KEYS, _BY_TOKENS, _FINDER_MTIME
+    global FINDER_MANUAL
     fc = vf.load_cache()
     FINDER_TEAMS = (fc or {}).get("teams", [])
     FINDER_BUILT = (fc or {}).get("built")
@@ -302,25 +312,48 @@ def reload_finder(quiet=False):
                 tok.setdefault(_toks(m["name"]), k)
     _BY_TOKENS = tok
     _unbridged.clear(); _loose.clear()      # re-warn against the new cache
-    try:
-        _FINDER_MTIME = os.path.getmtime(vf.CACHE)
-    except OSError:
-        _FINDER_MTIME = 0.0
+    FINDER_MANUAL = _merge_manual()
+    _FINDER_MTIME = _finder_mtimes()
     if not quiet:
         if FINDER_TEAMS:
             age = (time.time() - FINDER_BUILT) / 86400.0 if FINDER_BUILT else None
-            print(f"Teamsheets: {len(FINDER_TEAMS)} teams [{FINDER_FMT}]"
-                  + (f", built {age:.1f}d ago" if age is not None else ""))
+            print(f"Teamsheets: {len(FINDER_TEAMS) - FINDER_MANUAL} teams [{FINDER_FMT}]"
+                  + (f", built {age:.1f}d ago" if age is not None else "")
+                  + (f" + {FINDER_MANUAL} manual" if FINDER_MANUAL else ""))
         else:
             print(f"Teamsheets: none — run `python vgcfinder.py build --format {TEAM_FORMAT}`")
 
+def _merge_manual():
+    """Append manualteams.txt to FINDER_TEAMS. Showdown names ('Ninetales-Alola') go
+    through the same slug_to_key bridge a scanned sprite does, so a manual mon lands on
+    exactly the key the scan will look up — whatever spelling the tournament data used.
+    A species no tournament team has gets its own key and joins FINDER_KEYS."""
+    global FINDER_TEAMS
+    teams, problems = vf.load_manual()
+    for p in problems:
+        print(f"[manual] {p}")
+    added = []
+    for t in teams:
+        keys = []
+        for m in t["mons"]:
+            k = slug_to_key(m["name"].lower().replace(" ", "-")) or vf.norm(m["name"])
+            m["key"] = k
+            keys.append(k)
+        if len(set(keys)) != 6:
+            print(f"[manual] skipped '{t['player']}': two mons bridge to one key {keys}")
+            continue
+        t["keys"] = sorted(keys)
+        for m in t["mons"]:
+            if m["key"] not in FINDER_KEYS:
+                FINDER_KEYS.add(m["key"])
+                _BY_TOKENS.setdefault(_toks(m["name"]), m["key"])
+        added.append(t)
+    FINDER_TEAMS = FINDER_TEAMS + added
+    return len(added)
+
 def finder_if_changed():
-    """Reload only when the cache file has actually been rewritten."""
-    try:
-        m = os.path.getmtime(vf.CACHE)
-    except OSError:
-        return False
-    if m != _FINDER_MTIME:
+    """Reload only when the cache file or the manual file has been rewritten."""
+    if _finder_mtimes() != _FINDER_MTIME:
         reload_finder()
         return True
     return False
@@ -336,8 +369,6 @@ _NOISE = {"forme", "form", "mode", "breed", "mask", "flower"}
 
 _ALIAS = {"paldeantauroscombatbreed": "paldeantauros"}   # cache writes Combat bare
 _unbridged, _loose = set(), set()
-
-reload_finder()          # first load; re-read later whenever the file changes
 
 def slug_to_key(slug):
     """Dashboard slug -> vgcfinder norm key, or None if this mon isn't in the cache."""
@@ -371,6 +402,8 @@ def slug_to_key(slug):
         _unbridged.add(slug)
         print(f"[bridge] no teamsheet key for slug '{slug}'")
     return None
+
+reload_finder()          # first load; re-read later whenever either file changes
 
 def _auto_refresh_loop():
     """Every REFRESH_DAYS: re-pull the index and drop the per-Pokemon battle cache."""
@@ -814,6 +847,7 @@ def scan():
     if all(keys) and len(set(keys)) == 6:
         hits = vf.exact_teams(FINDER_TEAMS, keys)
         fin["n"] = len(hits)
+        fin["manual"] = sum(1 for t in hits if t.get("manual"))
         if len(hits) >= COND_MIN:
             agg = vf.aggregate(hits)
 
@@ -826,6 +860,8 @@ def scan():
             data = condition(copy.deepcopy(data), agg[key])
             if not data.get("cond_n"):
                 gdata = None                              # nothing conditioned; no toggle
+            else:
+                data["cond_manual"] = fin.get("manual", 0)
         buf = io.BytesIO(); crop.resize((96, 96)).save(buf, "PNG")
         thumb = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
         cards.append({"label": label, "slug": slug, "data": data,
@@ -1132,7 +1168,7 @@ def card_html(c, ei=0):
         # the badge IS the switch: it already states the mode, so it costs no extra space
         cbadge = (f'<span class="cbadge sw vlocal" onclick="toggleScope(this)"'
                   f' title="showing this exact team &mdash; click for global">'
-                  f'local &middot; {cn}</span>'
+                  f'{_local_label(cn, d.get("cond_manual", 0))}</span>'
                   f'<span class="cbadge sw glob vglobal" onclick="toggleScope(this)"'
                   f' title="showing all teams &mdash; click for this team">global</span>')
     else:
@@ -1148,6 +1184,14 @@ def card_html(c, ei=0):
       {dmg_wrap()}
       {note_wrap(slug)}{statwrap}</article>"""
 
+def _local_label(n, man):
+    """'local · 3', or flag the hand-entered share: 'local · 3 (1 manual)' / 'manual · 1'."""
+    if not man:
+        return f"local &middot; {n}"
+    if man >= n:
+        return f"manual &middot; {n}"
+    return f"local &middot; {n} ({man} manual)"
+
 def _finder_status(fin):
     """One line, leading with n — the number that says how much to trust the card."""
     if not FINDER_TEAMS:
@@ -1162,7 +1206,9 @@ def _finder_status(fin):
         return f'<span class="fstat off">only {b}/6 mons in cache &mdash; global{tail}</span>'
     if n < COND_MIN:
         return f'<span class="fstat off">no team ran this exact six &mdash; global{tail}</span>'
-    return f'<span class="fstat on">n = {n}{tail}</span>'
+    man = fin.get("manual", 0)
+    mtxt = f" ({man} manual)" if man else ""
+    return f'<span class="fstat on">n = {n}{mtxt}{tail}</span>'
 
 def team_note_panel(cards):
     """Notes for this exact six, independent of whether a teamsheet matched."""

@@ -24,6 +24,9 @@ import requests
 API = "https://play.limitlesstcg.com/api"
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vgcfinder_cache.json")
 UA = {"User-Agent": "vgcfinder/1.0 (personal use)"}
+# Hand-entered ladder teams (Showdown paste). Never written by build(), so a --fresh
+# rebuild can't wipe it.
+MANUAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manualteams.txt")
 
 
 # ---------- normalising names ----------
@@ -353,7 +356,7 @@ def aggregate(hits):
                                "mega": 0, "n": 0})
     for t in hits:
         for m in t["mons"]:
-            a = agg[norm(m["name"])]
+            a = agg[m.get("key") or norm(m["name"])]   # manual mons carry a bridged key
             a["n"] += 1
             if m["item"]:
                 a["item"][titlecase(m["item"])] += 1
@@ -379,6 +382,95 @@ def load_cache(path=CACHE):
     except Exception as e:
         print(f"vgcfinder: could not read {path}: {e}", file=sys.stderr)
         return None
+
+
+# ---------- manual teams (Showdown paste) ----------
+
+_BULLETS = ("-", "~", "*", "\u2022")          # Showdown writes '-', other tools '*' or '•'
+_SET_KEYS = ("Ability:", "Level:", "EVs:", "IVs:", "Tera Type:", "Shiny:",
+             "Happiness:", "Gigantamax:", "Dynamax Level:", "Hidden Power:")
+
+
+def _is_set_line(l):
+    return l.startswith(_BULLETS + _SET_KEYS) or l.endswith(" Nature")
+
+
+def _paste_mon(block):
+    """One Showdown set -> the same shape mon_entry() produces. EVs, IVs, level and
+    Tera lines are ignored; a missing nature or item just stays None."""
+    lines = [l.strip() for l in block.splitlines() if l.strip()]
+    head, _, item = lines[0].partition(" @ ")
+    head = re.sub(r"\s*\((?:M|F)\)\s*$", "", head.strip())      # gender marker
+    m = re.search(r"\(([^()]+)\)\s*$", head)                     # 'Nick (Species)'
+    name = re.sub(r"-Mega(-[XYZ])?$", "", (m.group(1) if m else head).strip())
+    item = item.strip() or None
+    ability = nature = None
+    moves = []
+    for l in lines[1:]:
+        if l.startswith("Ability:"):
+            ability = l.split(":", 1)[1].strip() or None
+        elif l.endswith(" Nature"):
+            nature = l[:-len(" Nature")].strip() or None
+        elif l.startswith(_BULLETS):
+            mv = l.lstrip("".join(_BULLETS) + " ").strip()
+            if mv:
+                moves.append(mv)
+    return {"name": name, "item": item, "ability": ability,
+            "mega": is_stone(item), "nature": nature, "moves": moves}
+
+
+def parse_paste(text):
+    """Showdown export -> (teams, problems). Teams are split on '=== name ===' header
+    lines; with no headers, every six sets make a team. Lines starting '#' are comments.
+    Anything that isn't six distinct species is reported and skipped, never guessed."""
+    sections, label, buf = [], None, []
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("==="):
+            if any(buf):
+                sections.append((label, buf))
+            label, buf = s.strip("= ").strip() or None, []
+        elif not s.startswith("#"):
+            buf.append(s)
+    if any(buf):
+        sections.append((label, buf))
+
+    teams, problems = [], []
+    for label, lines in sections:
+        # a new set starts at any line that isn't one of a set's own lines, so blank
+        # lines (or their absence) between and inside sets don't matter
+        blocks = []
+        for l in lines:
+            if not l:
+                continue
+            if _is_set_line(l) and blocks:
+                blocks[-1].append(l)
+            else:
+                blocks.append([l])
+        mons = [_paste_mon("\n".join(b)) for b in blocks]
+        groups = [mons] if label else [mons[i:i + 6] for i in range(0, len(mons), 6)]
+        for g in groups:
+            names = [m["name"] for m in g]
+            tag = label or " / ".join(names)
+            if len(g) != 6 or len({norm(x) for x in names}) != 6:
+                problems.append(f"skipped '{tag}': need 6 different Pokemon, got {len(g)}")
+                continue
+            teams.append({"keys": sorted(norm(x) for x in names), "mons": g,
+                          "player": label or "manual", "event": "manual",
+                          "tid": "manual", "place": None, "record": None,
+                          "manual": True})
+    return teams, problems
+
+
+def load_manual(path=None):
+    """(teams, problems) from the manual paste file; ([], []) if there isn't one."""
+    path = path or MANUAL
+    if not os.path.exists(path):
+        return [], []
+    try:
+        return parse_paste(open(path, encoding="utf-8-sig").read())
+    except Exception as e:
+        return [], [f"could not read {path}: {e}"]
 
 
 def exact_teams(teams, keys):
